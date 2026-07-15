@@ -63,4 +63,42 @@ Each suite is driven by an Excel workbook. Add rows and set `Run=Y` to enable th
 
 Columns: `Run, State, Year, Accordion, PlanName, ExpectedUrl`
 
+---
+
+## Git commands
+
+Repository: `https://github.com/Naresh-Jangid_molina/molina-automation-framework`
+Default working branch: `dev`
+
+### First-time clone (fresh machine)
+
+"git clone https://github.com/Naresh-Jangid_molina/molina-automation-framework.git" : Downloads the repo
+
+"cd molina-automation-framework" : Enter the project folder
+
+"git checkout dev" : Switch to the working branch
+
+"npm install" : Install dependencies
+
+### Everyday workflow
+
+"git status" : See what has changed locally
+
+"git pull" : Pull the latest changes from origin/dev before you start work
+
+"git add -A" : Stage all changes (new / modified / deleted files)
+
+"git add path/to/file" : Stage a specific file only
+
+"git commit -m ""your message""" : Commit staged changes with a message
+
+"git push" : Push commits to origin/dev
+
+### First-time git identity (per machine, one-time)
+
+"git config --global user.name ""Your Name""" : Set your commit author name
+
+"git config --global user.email ""you@molinahealthcare.com""" : Set your commit email
+
+
 
