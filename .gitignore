@@ -1,0 +1,41 @@
+# ── Dependencies ─────────────────────────────────────────────────────────
+node_modules/
+package-lock.json.lock
+.pnp
+.pnp.js
+
+# ── Playwright artefacts ─────────────────────────────────────────────────
+reports/
+test-results/
+playwright-report/
+playwright/.cache/
+blob-report/
+.playwright/
+
+# ── Env / secrets (globalproperties.env is intentionally committed — no secrets) ──
+.env
+.env.local
+.env.*.local
+
+# ── Logs ─────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── IDE / editor ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Misc ─────────────────────────────────────────────────────────────────
+coverage/
+*.tmp
+*.tgz

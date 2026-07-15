@@ -1,0 +1,26 @@
+{
+  "name": "molina-plan-material-automation",
+  "version": "1.0.0",
+  "description": "Standalone Playwright framework for Molina Medicare Plan Materials & Drug page PDF validation (accordion-driven).",
+  "main": "index.js",
+  "scripts": {
+    "clean:artifacts": "node hooks/globalSetup.js",
+    "config:show": "node -e \"console.log(JSON.stringify(require('./config/framework.config'), null, 2))\"",
+    "test": "playwright test tests/planMaterials/planMaterials.spec.js",
+    "test:headed": "playwright test tests/planMaterials/planMaterials.spec.js --workers=1 --headed",
+    "test:debug": "cross-env LOG_LEVEL=DEBUG npm run test",
+    "test:drug": "playwright test tests/drugs/drugs.spec.js",
+    "test:drug:headed": "playwright test tests/drugs/drugs.spec.js --workers=1 --headed",
+    "test:all": "playwright test",
+    "report:open": "start reports/plan-materials/PlanMaterials_ANOC_Report.html"
+  },
+  "keywords": ["playwright", "automation", "molina", "plan-materials", "pdf-validation"],
+  "author": "Molina QA Automation",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "dotenv": "^17.3.1",
+    "xlsx": "^0.18.5"
+  }
+}
