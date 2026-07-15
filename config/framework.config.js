@@ -2,9 +2,13 @@
  * Framework configuration — the SINGLE source of truth for every knob.
  *
  * Precedence (highest wins):
- *   1. Shell environment variables (e.g. `$env:HEADLESS = "true"`)
+ *   1. Shell environment variables (e.g. `$env:PLAN_MATERIALS_STATE = "NE"`)
  *   2. `config/globalproperties.env` (tester-facing dotenv file)
  *   3. Hardcoded defaults below
+ *
+ * Note: run mode (headless vs headed) is controlled by the CLI `--headed`
+ * flag only — see the `headless` field below and the `test:headed` /
+ * `test:drug:headed` npm scripts.
  *
  * Every consumer (spec, playwright.config.js, page objects, utils) should
  * import this file — nothing else should read `process.env.*` directly.
@@ -51,7 +55,11 @@ const config = {
   titleComparisonConcurrency: env('TITLE_COMPARISON_CONCURRENCY', 20),
 
   // ── Browser ──
-  headless: process.argv.includes('--headed') ? false : env('HEADLESS', false),
+  // Headless is the default (Playwright convention). Pass --headed on the
+  // CLI (e.g. `npm run test:headed`) to launch a visible Chrome window.
+  // playwright.config.js detects --headed in the main process and sets
+  // PW_HEADED=1 so worker processes (which don't inherit argv) see it too.
+  headless: process.env.PW_HEADED !== '1',
   viewport: {
     width: env('VIEWPORT_WIDTH', 1920),
     height: env('VIEWPORT_HEIGHT', 1080)

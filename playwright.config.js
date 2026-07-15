@@ -1,5 +1,14 @@
 const { defineConfig } = require('@playwright/test');
 
+// Detect `--headed` (or `--ui` / `--debug`, which imply headed) in the CLI
+// args of the main Playwright process, then forward the decision to worker
+// processes via an env var. Workers don't see the parent's argv but they do
+// inherit env vars, so this makes `frameworkConfig.headless` resolve
+// consistently in both places (main config load + browserHelper in workers).
+if (process.argv.some(a => a === '--headed' || a === '--ui' || a === '--debug')) {
+  process.env.PW_HEADED = '1';
+}
+
 // R6: single source of config. framework.config.js already loads
 // globalproperties.env → default .env; we just read the resolved values here.
 const frameworkConfig = require('./config/framework.config');
