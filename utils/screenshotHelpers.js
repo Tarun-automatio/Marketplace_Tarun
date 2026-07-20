@@ -286,6 +286,127 @@ async function ensureValidScreenshot(takeShotFn, fallbackPanelFn) {
   }
 }
 
+// ─── Real PDF preview via pdfjs-dist ──────────────────────────────────────
+//
+// Chrome's built-in PDF viewer is not part of the DOM and cannot be
+// captured by page.screenshot / CDP Page.captureScreenshot (both return a
+// blank/uniform image). This helper renders page 1 of the PDF ourselves
+// using pdfjs-dist inside a fresh Playwright page, then returns a data URI
+// of the canvas — visually identical to what a user sees when they open
+// the PDF in a new Chrome tab.
+//
+// Design notes:
+//   • Fetches PDF bytes through `context.request` so any session cookies /
+//     bearer headers set on the browser context are honoured.
+//   • Uses pdfjs-dist v3 UMD build (`legacy/build/pdf.min.js`) — the newer
+//     v4 ships ESM only which `page.addScriptTag` cannot load as a plain
+//     <script>.
+//   • The worker file is read once and injected into the page as a Blob
+//     URL, so pdfjs can spawn its Web Worker without any HTTP server.
+//   • Safe by construction: any thrown error is caught in the caller
+//     (`ensureValidScreenshot` / a try/catch) so failure falls back to the
+//     existing placeholder panel.
+
+let _pdfjsLibSource = null;
+let _pdfjsWorkerSource = null;
+
+function loadPdfjsSources() {
+  if (_pdfjsLibSource && _pdfjsWorkerSource) return;
+  const libPath    = require.resolve('pdfjs-dist/legacy/build/pdf.min.js');
+  const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.min.js');
+  _pdfjsLibSource    = fs.readFileSync(libPath, 'utf8');
+  _pdfjsWorkerSource = fs.readFileSync(workerPath, 'utf8');
+}
+
+/**
+ * Render page 1 of a PDF to a PNG data URI using pdfjs-dist inside a fresh
+ * Playwright page. Returns null on failure so callers can fall back cleanly.
+ *
+ * @param {import('@playwright/test').BrowserContext} context
+ * @param {string} pdfUrl        — absolute URL of the PDF
+ * @param {object} [opts]
+ * @param {number} [opts.scale=1.5]  — pdfjs render scale (higher = sharper)
+ * @param {number} [opts.timeout=30000]  — overall timeout in ms
+ * @returns {Promise<string|null>}   — `data:image/png;base64,...` or null
+ */
+async function renderPdfFirstPageAsDataUri(context, pdfUrl, opts = {}) {
+  const scale   = opts.scale   || 1.5;
+  const timeout = opts.timeout || 30000;
+
+  if (!pdfUrl) return null;
+
+  try {
+    loadPdfjsSources();
+  } catch (err) {
+    logger.warn('PDF', `pdfjs-dist not available: ${err.message.substring(0, 120)}`);
+    return null;
+  }
+
+  // 1) Fetch PDF bytes through Playwright's request context so cookies /
+  //    auth headers from the browser context are reused.
+  let pdfBytes;
+  try {
+    const response = await context.request.get(pdfUrl, { timeout });
+    if (!response.ok()) {
+      logger.warn('PDF', `PDF fetch returned HTTP ${response.status()} — ${pdfUrl}`);
+      return null;
+    }
+    pdfBytes = await response.body();
+  } catch (err) {
+    logger.warn('PDF', `PDF fetch failed: ${err.message.substring(0, 140)}`);
+    return null;
+  }
+  if (!pdfBytes || pdfBytes.length < 100) return null;
+
+  const base64 = pdfBytes.toString('base64');
+
+  // 2) Open a fresh page and render page 1 to a canvas via pdfjs-dist.
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ width: 1200, height: 1600 });
+    await page.setContent(
+      '<!doctype html><html><body style="margin:0;background:#ffffff;"></body></html>',
+      { waitUntil: 'domcontentloaded' },
+    );
+    await page.addScriptTag({ content: _pdfjsLibSource });
+
+    const dataUri = await page.evaluate(async ({ workerSrc, base64, scale }) => {
+      // Set up the pdfjs worker as a Blob URL (no HTTP server needed).
+      const blob = new Blob([workerSrc], { type: 'application/javascript' });
+      const workerBlobUrl = URL.createObjectURL(blob);
+      // eslint-disable-next-line no-undef
+      pdfjsLib.GlobalWorkerOptions.workerSrc = workerBlobUrl;
+
+      const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+      // eslint-disable-next-line no-undef
+      const pdf = await pdfjsLib.getDocument({ data: bytes, disableFontFace: false }).promise;
+      const pg = await pdf.getPage(1);
+      const viewport = pg.getViewport({ scale });
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      document.body.appendChild(canvas);
+
+      const ctx2d = canvas.getContext('2d');
+      // Paint a white background so transparent PDFs still look right.
+      ctx2d.fillStyle = '#ffffff';
+      ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+
+      await pg.render({ canvasContext: ctx2d, viewport }).promise;
+      return canvas.toDataURL('image/png');
+    }, { workerSrc: _pdfjsWorkerSource, base64, scale });
+
+    if (!dataUri || !dataUri.startsWith('data:image/png;base64,')) return null;
+    return dataUri;
+  } catch (err) {
+    logger.warn('PDF', `pdfjs render failed: ${err.message.substring(0, 160)}`);
+    return null;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 module.exports = {
   readPngDimensions,
   isProbablyBlank,
@@ -294,4 +415,5 @@ module.exports = {
   highlightAndCapture,
   captureEvidencePanel,
   ensureValidScreenshot,
+  renderPdfFirstPageAsDataUri,
 };

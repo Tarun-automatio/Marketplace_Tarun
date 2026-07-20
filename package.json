@@ -16,7 +16,13 @@
     "test:all": "playwright test",
     "report:open": "start reports/plan-materials/PlanMaterials_ANOC_Report.html"
   },
-  "keywords": ["playwright", "automation", "molina", "plan-materials", "pdf-validation"],
+  "keywords": [
+    "playwright",
+    "automation",
+    "molina",
+    "plan-materials",
+    "pdf-validation"
+  ],
   "author": "Molina QA Automation",
   "license": "ISC",
   "type": "commonjs",
@@ -24,5 +30,8 @@
     "@playwright/test": "^1.58.2",
     "dotenv": "^17.3.1",
     "xlsx": "^0.18.5"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^3.11.174"
   }
 }

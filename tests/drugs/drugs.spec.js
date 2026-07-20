@@ -53,6 +53,7 @@ const {
 const {
   captureEvidencePanel,
   ensureValidScreenshot,
+  renderPdfFirstPageAsDataUri,
 } = require('../../utils/screenshotHelpers');
 const { createPlanMaterialsFixture } = require('../../fixtures/planMaterialsFixture');
 const { DrugPage } = require('../../pages/drugPage');
@@ -143,9 +144,16 @@ function loadTestMatrix() {
           if (!state || !year || !accordion) continue;
           const key = `${state.toUpperCase()}|${year}|${accordion}`;
           if (!groups.has(key)) {
-            groups.set(key, { state, year, accordion, plans: [], source: 'excel' });
+            groups.set(key, { state, year, accordion, testId: norm(r.TestId), plans: [], source: 'excel' });
           }
           const scope = groups.get(key);
+          // First non-empty TestId in the group wins; warn on mismatch.
+          const rowTestId = norm(r.TestId);
+          if (rowTestId && !scope.testId) scope.testId = rowTestId;
+          else if (rowTestId && scope.testId && rowTestId !== scope.testId) {
+            logger.warn('DATA',
+              `Scope ${key} has conflicting TestIds ("${scope.testId}" vs "${rowTestId}") — keeping "${scope.testId}"`);
+          }
           const name = norm(r.PlanName);
           const url  = norm(r.ExpectedUrl);
           if (name) scope.plans.push({ name, url });
@@ -206,9 +214,7 @@ function normalizeUrlForCompare(url) {
   }
 }
 
-base.setTimeout(frameworkConfig.testTimeoutMs || 1800000);
-
-// ── PDF page-level screenshot capture (identical to planMaterials.spec.js) ────────
+// PDF page-level screenshot capture (identical to planMaterials.spec.js)
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -246,12 +252,23 @@ async function capturePdfPageAsDataUri(pdfPage) {
       buf = await pdfPage.screenshot({ fullPage: false, type: 'png' });
     }
 
-    if (!buf || buf.length < 3000) return null;
-    if (isUniformPngBuffer(buf)) {
-      logger.warn('SCREENSHOT', `PDF viewer screenshot appears uniform (${buf.length} B) — Chrome PDF plugin did not paint; using placeholder.`);
-      return null;
+    if (buf && buf.length >= 3000 && !isUniformPngBuffer(buf)) {
+      return `data:image/png;base64,${buf.toString('base64')}`;
     }
-    return `data:image/png;base64,${buf.toString('base64')}`;
+
+    // Native capture came back blank — Chrome's PDF viewer paints into a
+    // compositor surface outside the DOM. Fall back to rendering page 1 of
+    // the PDF ourselves via pdfjs-dist so the report still shows the real
+    // document cover instead of a placeholder.
+    const pdfUrl = pdfPage.url();
+    if (/\.pdf(\?|#|$)/i.test(pdfUrl)) {
+      logger.info('PDF', `Native PDF viewer capture blank — rendering page 1 via pdfjs-dist for ${pdfUrl.split('/').pop()}`);
+      const rendered = await renderPdfFirstPageAsDataUri(pdfPage.context(), pdfUrl);
+      if (rendered) return rendered;
+    }
+
+    logger.warn('SCREENSHOT', `PDF preview unavailable (native blank, pdfjs render failed) — using placeholder.`);
+    return null;
   } catch (err) {
     logger.warn('SCREENSHOT', `PDF page screenshot failed: ${err.message.substring(0, 120)}`);
     return null;
@@ -270,10 +287,33 @@ if (TEST_MATRIX.length === 0) {
 
 function registerTestsForScope(scope) {
   const scopeLabel   = `${scope.state} · ${scope.year} · ${scope.accordion}`;
-  const scopeSlug    = slugifyScope(scope.state, scope.year, scope.accordion);
+  const baseSlug     = slugifyScope(scope.state, scope.year, scope.accordion);
+
+  // Sanitize the descriptive TestId marketplace-style so it can be used as
+  // both a filesystem folder AND a self-identifying report filename.
+  // Rules (mirror tests/marketplace/marketplace.spec.js):
+  //   - Strip Windows-invalid path chars (\ / : * ? " < > |)
+  //   - Drop parentheses
+  //   - Collapse whitespace to underscores
+  const sanitizeForFs = (s) => s
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/[()]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_');
+
+  const testIdSlug = scope.testId ? sanitizeForFs(scope.testId) : '';
+  const scopeSlug  = testIdSlug || baseSlug;
   const scopeDir     = path.join(REPORT_DIR, scopeSlug);
   const screenshotsDir = path.join(scopeDir, 'screenshots');
-  const reportFile     = path.join(scopeDir, 'DrugPage_Report.html');
+  // Self-identifying report filename — the sanitized TestId, matching
+  // marketplace's convention where every HTML file names its own test.
+  const reportBasename = testIdSlug || 'DrugPage_Report';
+  const reportFile     = path.join(scopeDir, `${reportBasename}.html`);
+
+  // Short TC-code (first whitespace-separated token) — keeps screenshot
+  // filenames terse ("TC001_Plan1_Step1_OpenPDF.png") while the full
+  // descriptive TestId lives on the folder + report + describe title.
+  const shortTestCode = scope.testId ? String(scope.testId).trim().split(/\s+/)[0] : '';
 
   const testName        = `Drug — ${scope.accordion} PDF Validation`;
   const testDescription =
@@ -282,7 +322,12 @@ function registerTestsForScope(scope) {
     `then for each expected plan click the link, verify a new tab opens, and ` +
     `verify the resulting PDF URL matches the expected URL supplied by the data file.`;
 
-  base.describe(`Drug — ${scopeLabel}`, () => {
+  // Describe title uses the descriptive TestId verbatim when present
+  // (e.g. "TC001 DRUG Comprehensive Formulary NE-2027"), otherwise falls
+  // back to the legacy "Drug — <scopeLabel>" heading.
+  const describeTitle = scope.testId || `Drug — ${scopeLabel}`;
+
+  base.describe(describeTitle, () => {
     base.describe.configure({ retries: 0, mode: 'serial' });
 
     const setupSteps       = [];
@@ -316,7 +361,7 @@ function registerTestsForScope(scope) {
           reportFile,
           testMeta: {
             name: testName,
-            id: TEST_ID,
+            id: scope.testId || TEST_ID,
             module: TEST_MODULE,
             description: testDescription,
             author: TEST_AUTHOR,
@@ -371,7 +416,7 @@ function registerTestsForScope(scope) {
         // rows aligned with their own targets/PDF URLs.
         const target = planMaterialsCtx.targets[i]
           || { name: plan.name, expectedUrl: plan.url, discovered: null, missing: true };
-        await validateOnePlan(target, i + 1, planMaterialsCtx);
+        await validateOnePlan(target, i + 1, planMaterialsCtx, shortTestCode);
       });
     });
   });
@@ -382,9 +427,12 @@ function registerTestsForScope(scope) {
  * Identical logic to plan materials — this validates any PDF link regardless
  * of which page it came from. The 1-based `index` becomes the plan-card id.
  */
-async function validateOnePlan(target, index, ctx) {
+async function validateOnePlan(target, index, ctx, scopeTestId) {
   const { context, materials, accordion, scope, screenshotsDir, planCards } = ctx;
   const isDataDriven = true;
+  const shotPrefix = scopeTestId
+    ? `${scopeTestId}_Plan${index}`
+    : `Plan${index}`;
   const card = {
     id: index,
     name: target.name,
@@ -403,7 +451,7 @@ async function validateOnePlan(target, index, ctx) {
   if (target.missing) {
     card.status = 'FAIL';
     card.error = `Plan "${target.name}" was not found under the ${scope.accordion} accordion.`;
-    const missShot = path.join(screenshotsDir, `Plan${card.id}_NotFound.png`);
+    const missShot = path.join(screenshotsDir, `${shotPrefix}_NotFound.png`);
     const missRes = await ensureValidScreenshot(
       () => captureEvidencePanel(context,
         fallbackPanelHtml(target.name, card.error),
@@ -450,7 +498,7 @@ async function validateOnePlan(target, index, ctx) {
       card.error = 'No new tab opened within timeout';
     }
 
-    const openShot = path.join(screenshotsDir, `Plan${card.id}_Step1_OpenPDF.png`);
+    const openShot = path.join(screenshotsDir, `${shotPrefix}_Step1_OpenPDF.png`);
     const openRes = await ensureValidScreenshot(
       () => captureEvidencePanel(context,
         pdfNewTabPanelHtml(target.name, card.pdfUrl, pdfPageDataUri, pdfOpened),
@@ -496,7 +544,7 @@ async function validateOnePlan(target, index, ctx) {
     }
     const urlOverall = urlChecks.every(c => c.pass);
 
-    const urlShot = path.join(screenshotsDir, `Plan${card.id}_Step2_VerifyURL.png`);
+    const urlShot = path.join(screenshotsDir, `${shotPrefix}_Step2_VerifyURL.png`);
     const urlRes = await ensureValidScreenshot(
       () => captureEvidencePanel(context,
         urlValidationPanelHtml(target.name, card.pdfUrl, target.expectedUrl, urlChecks),

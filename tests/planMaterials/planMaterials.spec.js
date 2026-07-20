@@ -65,6 +65,7 @@ const {
 const {
   captureEvidencePanel,
   ensureValidScreenshot,
+  renderPdfFirstPageAsDataUri,
 } = require('../../utils/screenshotHelpers');
 const { createPlanMaterialsFixture } = require('../../fixtures/planMaterialsFixture');
 const { writeReport, packageReport } = require('../../reporting/reportGenerator');
@@ -241,13 +242,7 @@ function normalizeUrlForCompare(url) {
   }
 }
 
-// Note: `test` (extended with the fixture) is defined further down; use
-// the base import here so this module-level call runs before that.
-base.setTimeout(frameworkConfig.testTimeoutMs || 1800000);
-
-// ══════════════════════════════════════════════════════════════════════════
 // Data model
-// ══════════════════════════════════════════════════════════════════════════
 //
 // setupSteps[] — timeline for a single scope (state, year, accordion)
 //   { id, name, expected, actual, status, screenshotPath, screenshotLabel }
@@ -322,12 +317,22 @@ async function capturePdfPageAsDataUri(pdfPage) {
       buf = await pdfPage.screenshot({ fullPage: false, type: 'png' });
     }
 
-    if (!buf || buf.length < 3000) return null;
-    if (isUniformPngBuffer(buf)) {
-      logger.warn('SCREENSHOT', `PDF viewer screenshot appears uniform (${buf.length} B) — Chrome PDF plugin did not paint; using placeholder.`);
-      return null;
+    if (buf && buf.length >= 3000 && !isUniformPngBuffer(buf)) {
+      return `data:image/png;base64,${buf.toString('base64')}`;
     }
-    return `data:image/png;base64,${buf.toString('base64')}`;
+
+    // Attempt 3 — render page 1 ourselves via pdfjs-dist inside a fresh
+    // Playwright page. This produces the real PDF cover image regardless of
+    // whether Chrome's PDF viewer painted its compositor surface.
+    const pdfUrl = pdfPage.url();
+    if (/\.pdf(\?|#|$)/i.test(pdfUrl)) {
+      logger.info('PDF', `Native PDF viewer capture blank — rendering page 1 via pdfjs-dist for ${pdfUrl.split('/').pop()}`);
+      const rendered = await renderPdfFirstPageAsDataUri(pdfPage.context(), pdfUrl);
+      if (rendered) return rendered;
+    }
+
+    logger.warn('SCREENSHOT', `PDF preview unavailable (native blank, pdfjs render failed) — using placeholder.`);
+    return null;
   } catch (err) {
     logger.warn('SCREENSHOT', `PDF page screenshot failed: ${err.message.substring(0, 120)}`);
     return null;
