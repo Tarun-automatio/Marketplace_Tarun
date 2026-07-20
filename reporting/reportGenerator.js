@@ -80,7 +80,7 @@ function embedImageOrNull(filePath) {
  * `imageIndex` is the 0-based position in the global lightbox image list, used
  * for prev/next navigation.
  */
-function renderThumbnail(title, filePath, imageIndex) {
+function renderThumbnail(title, filePath, imageIndex, opts = {}) {
   const img = embedImageOrNull(filePath);
   const safeTitle = escapeHtml(title || '');
   if (!img) {
@@ -91,11 +91,17 @@ function renderThumbnail(title, filePath, imageIndex) {
         <div class="thumb-caption">Screenshot unavailable</div>
       </div>`;
   }
+  // `opts.simpleCaption` suppresses the trailing resolution — used by
+  // writeStepsReport() for the marketplace suite where every screenshot
+  // is a uniform 1920×1080 so the resolution string is just visual noise.
+  const caption = opts.simpleCaption
+    ? 'Click to view'
+    : `Click to view · ${img.width || '?'}×${img.height || '?'}`;
   return `
     <div class="thumb" onclick="openLightbox(${imageIndex})" title="${safeTitle}">
       <div class="thumb-img-wrap"><img src="${img.dataUri}" alt="${safeTitle}" loading="lazy"/></div>
       <div class="thumb-title">${safeTitle}</div>
-      <div class="thumb-caption">Click to view · ${img.width || '?'}×${img.height || '?'}</div>
+      <div class="thumb-caption">${caption}</div>
     </div>`;
 }
 
@@ -105,10 +111,11 @@ function renderThumbnail(title, filePath, imageIndex) {
  */
 function renderStepsTable(steps, opts = {}) {
   const emptyMsg = opts.emptyMsg || 'No steps recorded.';
+  const thumbOpts = opts.thumbOpts || {};
   if (!steps.length) return `<div class="empty-msg">${escapeHtml(emptyMsg)}</div>`;
   const rows = steps.map((s) => {
     const thumb = s.screenshotPath
-      ? renderThumbnail(s.screenshotLabel || s.name, s.screenshotPath, s.__imgIdx)
+      ? renderThumbnail(s.screenshotLabel || s.name, s.screenshotPath, s.__imgIdx, thumbOpts)
       : '<div class="empty-msg" style="padding:8px;">No screenshot</div>';
     const expected = s.expected || '';
     const actual   = s.actual   || s.description || '';
@@ -671,6 +678,164 @@ function writeReport(ctx) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// writeStepsReport() — step-only variant for linear flows (marketplace, etc.)
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Write a self-contained HTML report for flows that are a simple sequence
+ * of steps with no per-plan validation matrix (e.g. the Marketplace
+ * coverage-year toggle flow). Reuses the same CSS, header style, status
+ * badges, lightbox and thumbnails as `writeReport()` for visual consistency
+ * across the framework.
+ *
+ * @param {object} ctx
+ * @param {string} ctx.reportDir       — absolute folder to write into (created if missing)
+ * @param {string} ctx.reportFile      — absolute HTML file path to write
+ * @param {object} [ctx.testMeta]      — { name, description, id, module, environment }
+ * @param {string} [ctx.appUrl]        — target URL (shown in test details)
+ * @param {Array}  ctx.steps           — [{ id, name, status, expected, actual, screenshotPath, screenshotLabel? }]
+ * @param {number} [ctx.durationMs]    — total run duration
+ * @param {string} [ctx.timestamp]     — pre-formatted timestamp (defaults to now)
+ * @returns {string} the report file path that was written
+ */
+function writeStepsReport(ctx) {
+  const {
+    reportDir,
+    reportFile,
+    testMeta = {},
+    appUrl,
+    steps = [],
+    durationMs = 0,
+    timestamp = new Date().toLocaleString(),
+  } = ctx;
+
+  if (!reportDir || !reportFile) {
+    throw new Error('writeStepsReport: reportDir and reportFile are required in ctx');
+  }
+  fs.mkdirSync(reportDir, { recursive: true });
+
+  // Reuse the same image indexing helper — passing empty plan/responsive
+  // arrays gives us the numeric __imgIdx on each step for the lightbox.
+  const lightboxImages = indexImages(steps, [], []);
+
+  const totalSteps  = steps.length;
+  const passedSteps = steps.filter(s => s.status === 'PASS').length;
+  const failedSteps = steps.filter(s => s.status === 'FAIL').length;
+  const passRate    = totalSteps ? Math.round((passedSteps / totalSteps) * 100) : 0;
+
+  const durationStr = durationMs >= 60000
+    ? `${Math.floor(durationMs / 60000)}m ${Math.round((durationMs % 60000) / 1000)}s`
+    : `${Math.round(durationMs / 1000)}s`;
+
+  const overall = (totalSteps > 0 && failedSteps === 0) ? 'PASS' : 'FAIL';
+
+  const kpi = (label, value, sub, cls) => `
+    <div class="kpi ${cls || ''}">
+      <div class="kpi-label">${escapeHtml(label)}</div>
+      <div class="kpi-value">${escapeHtml(String(value))}</div>
+      ${sub ? `<div class="kpi-sub">${escapeHtml(sub)}</div>` : ''}
+    </div>`;
+
+  const stepsHtml = renderStepsTable(steps, {
+    emptyMsg: 'No steps recorded.',
+    thumbOpts: { simpleCaption: true },  // marketplace: suppress "· WxH" caption
+  });
+
+  // ── Header / Test Details block ──────────────────────────────────────
+  const testName        = testMeta.name        || 'Test';
+  const testDescription = testMeta.description || '';
+  const testId          = testMeta.id          || '';
+  const testModule      = testMeta.module      || '';
+  const testEnvironment = testMeta.environment || '';
+
+  const detailRow = (k, v, opts = {}) => v
+    ? `<div class="td-row"><div class="td-k">${escapeHtml(k)}</div><div class="td-v${opts.mono ? ' mono' : ''}">${opts.raw ? v : escapeHtml(v)}</div></div>`
+    : '';
+  const testDetailsHtml = `
+    <section class="test-details">
+      <header class="td-header">
+        <div class="td-eyebrow">Test Details</div>
+        <div class="td-title-row">
+          <h2 class="td-title">${escapeHtml(testName)}</h2>
+          ${reportStatusBadge(overall)}
+        </div>
+        ${testDescription ? `<p class="td-desc">${escapeHtml(testDescription)}</p>` : ''}
+      </header>
+      <div class="td-grid">
+        ${detailRow('Test ID',        testId)}
+        ${detailRow('Module',         testModule)}
+        ${detailRow('Environment',    testEnvironment)}
+        ${detailRow('Application URL', appUrl, { mono: true })}
+        ${detailRow('Executed On',    timestamp)}
+        ${detailRow('Duration',       durationStr)}
+      </div>
+    </section>`;
+
+  const lightboxJson = JSON.stringify(lightboxImages);
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>${escapeHtml(testName)} — Report</title>
+  <style>${reportCss()}</style>
+</head>
+<body>
+  <div class="sticky-summary">
+    <div class="brand">Molina Automation · ${escapeHtml(testModule || 'Automation')}</div>
+    <div class="tiny-kpis">
+      <div class="tiny-kpi ${overall === 'PASS' ? 'ok' : 'bad'}">Overall ${overall}</div>
+      <div class="tiny-kpi ${failedSteps ? 'bad' : 'ok'}">${passedSteps}/${totalSteps} steps</div>
+      <div class="tiny-kpi">${escapeHtml(durationStr)}</div>
+    </div>
+    <div class="status">${reportStatusBadge(overall)}</div>
+    <div class="toolbar">
+      <button onclick="document.documentElement.classList.toggle('dark')">Theme</button>
+      <button onclick="window.print()">Print</button>
+    </div>
+  </div>
+
+  <div class="wrap">
+    ${testDetailsHtml}
+
+    <div class="kpi-grid">
+      ${kpi('Total steps', totalSteps, '', 'info')}
+      ${kpi('Passed', passedSteps, `${passRate}% pass-rate`, 'ok')}
+      ${kpi('Failed', failedSteps, '', failedSteps ? 'bad' : '')}
+      ${kpi('Duration', durationStr, '', '')}
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Test Steps</h2>
+      ${stepsHtml}
+    </div>
+  </div>
+
+  <div id="lb" class="lb" role="dialog" aria-modal="true" aria-label="Screenshot viewer">
+    <div class="lb-header">
+      <div class="lb-title" id="lbTitle"></div>
+      <div class="lb-index" id="lbIndex"></div>
+      <button id="lbPrev" title="Previous (←)">&larr; Prev</button>
+      <button id="lbNext" title="Next (→)">Next &rarr;</button>
+      <button id="lbZoomOut" title="Zoom out (-)">−</button>
+      <button id="lbZoomIn" title="Zoom in (+)">+</button>
+      <button id="lbReset" title="Reset zoom (0)">1×</button>
+      <button id="lbClose" title="Close (Esc)">Close ✕</button>
+    </div>
+    <div class="lb-viewport" id="lbViewport"><img id="lbImg" alt=""/></div>
+    <div class="lb-hint">Keyboard: ← → prev/next · +/− zoom · 0 reset · Esc close</div>
+  </div>
+
+  <script>${lightboxScript(lightboxJson)}</script>
+</body>
+</html>`;
+
+  fs.writeFileSync(reportFile, html, 'utf8');
+  return reportFile;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Evidence packaging — zip the whole report folder for easy attachment
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -736,6 +901,7 @@ function packageReport(reportDir, zipPath) {
 
 module.exports = {
   writeReport,
+  writeStepsReport,
   packageReport,
   // Exported for future testing / customisation, but not required by callers.
   escapeHtml,

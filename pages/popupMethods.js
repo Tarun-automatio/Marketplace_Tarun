@@ -302,6 +302,19 @@ module.exports = {
         '[role="dialog"] .close', '.overlay .close', '.popup .close',
         '[class*="modal"] [class*="close"]', '[class*="popup"] [class*="close"]',
         '[class*="overlay"] [class*="close"]',
+        // Case-insensitive CSS-module hashed class names (e.g. React apps
+        // that emit `SomeModal_closeButton__hash`). Attribute selectors
+        // are case-sensitive by default, so we add the `i` flag variants.
+        '[class*="Modal" i] [class*="close" i]',
+        '[class*="Popup" i] [class*="close" i]',
+        // Molina "You are leaving the Molina Healthcare website"
+        // (ExternalSiteModal) — appears when a link would open an external
+        // site. Target by stable class prefix so the hash suffix doesn't
+        // matter. Prefer the close (X) button; the stay button is a safe
+        // alternative that also dismisses the popup.
+        '[class^="ExternalSiteModal_"] [class*="closeButton"]',
+        '[class^="ExternalSiteModal_"] button[aria-label="close" i]',
+        '[class^="ExternalSiteModal_"] [class*="stayButton"]',
       ];
       for (const sel of closeSelectors) {
         document.querySelectorAll(sel).forEach((btn) => {
@@ -441,6 +454,11 @@ module.exports = {
         '.modalconent', '.modalcontent',
         '#onetrust-banner-sdk', '#CybotCookiebotDialog', '#cookie-banner',
         '[class*="cookie-banner"]', '[class*="cookie-consent"]', '[class*="consent-banner"]',
+        // Molina external-site confirmation modal ("You are leaving the
+        // Molina Healthcare website"). The class prefix is stable; the
+        // hash suffix varies per build. Remove the entire popup wrapper.
+        '[class^="ExternalSiteModal_popup"]',
+        '[class*="ExternalSiteModal_popup"]',
       ];
       for (const sel of overlaySelectors) {
         document.querySelectorAll(sel).forEach(el => { el.remove(); removedCount++; });

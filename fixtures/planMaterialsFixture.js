@@ -49,6 +49,50 @@ const RESPONSIVE_DEVICES = [
 ];
 
 /**
+ * Best-effort dismiss + hide the Molina cookie consent banner so it does
+ * not obscure Step 2 / Step 3 evidence screenshots.
+ *
+ * The framework's `_hideFixedElementsForScreenshot()` in screenshotMethods
+ * doesn't match Molina's specific cookie banner classes, and the fixture
+ * uses raw `page.screenshot()` (bypassing framework prep). So we do a
+ * scoped, fixture-local hide here — no framework changes, no impact on
+ * other suites.
+ */
+async function suppressCookieBanner(materials, page) {
+  // First try the framework's Accept-button click (best-effort).
+  try { await materials.capture.acceptCookiesIfPresent(); } catch { /* ignore */ }
+  // Then force-hide any banner still in the DOM. We look for fixed/sticky
+  // elements whose text mentions "cookie" AND for known banner selectors.
+  await page.evaluate(() => {
+    const knownSelectors = [
+      '#onetrust-banner-sdk', '#CybotCookiebotDialog', '#cookie-banner',
+      '[class*="cookie-banner"]', '[class*="cookie-consent"]',
+      '[class*="consent-banner"]', '[id*="cookie" i]',
+      '[aria-label*="cookie" i]',
+    ];
+    for (const sel of knownSelectors) {
+      document.querySelectorAll(sel).forEach((el) => {
+        el.style.setProperty('display', 'none', 'important');
+      });
+    }
+    // Fallback: any fixed/sticky element whose text starts with "cookie"
+    // (matches Molina's "Cookies message" banner even if class is unstable).
+    document.querySelectorAll('div, section, aside').forEach((el) => {
+      const style = window.getComputedStyle(el);
+      const pos = style.position;
+      if (pos !== 'fixed' && pos !== 'sticky') return;
+      const txt = (el.innerText || '').trim().toLowerCase();
+      if (!txt) return;
+      if (txt.startsWith('cookies message')
+          || txt.startsWith('cookie ')
+          || txt.startsWith('we use cookies')) {
+        el.style.setProperty('display', 'none', 'important');
+      }
+    });
+  }).catch(() => {});
+}
+
+/**
  * Create the worker-scoped fixture body for a single Plan Materials scope.
  *
  * The fixture is section-agnostic: pass a different `PageClass` and
@@ -145,24 +189,32 @@ function createPlanMaterialsFixture({
     }
 
     const section = await materials.scrollToPlanMaterialsSection(scope.year);
-    // Bring the TARGET accordion into view (still collapsed) so the Step 2
-    // evidence screenshot clearly shows the accordion that Step 3 will
-    // expand — e.g. "Comprehensive Formulary" for the drug page.
-    // Falls back gracefully to the section header if the accordion can't be
-    // located (should never happen, but we don't want to break the flow).
+    // Force the SECTION HEADING to the top of the viewport so the shot
+    // clearly shows the "<year> <sectionLabel>" title — e.g. "2027 Plan
+    // Materials" or "2027 Pharmacy and Prescription Benefits Documents".
+    // The first accordion (typically the target for Step 3) remains
+    // naturally visible below the heading; if the target is a later
+    // accordion in the list it will still appear in Step 3's expanded shot.
     try {
-      const targetAccordionBtn = materials.accordionButton(section, scope.accordion);
-      if (await targetAccordionBtn.count()) {
-        await targetAccordionBtn.scrollIntoViewIfNeeded().catch(() => {});
-      }
-    } catch { /* ignore — fall back to section scroll below */ }
+      await section.evaluate((el) => {
+        el.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' });
+      });
+      // Nudge up a little so any sticky page header doesn't overlap the
+      // section heading in the screenshot.
+      await page.evaluate(() => window.scrollBy(0, -20)).catch(() => {});
+    } catch { /* best-effort — fall back to whatever scroll state exists */ }
 
     const sectionShot = path.join(screenshotsDir, `Step2_Section_${scope.year}_Plan_Materials.png`);
     const sectionRes = await ensureValidScreenshot(
       async () => {
-        // If the accordion scroll above worked, this is a no-op. If it
-        // didn't, we at least scroll the section back into view.
-        await section.scrollIntoViewIfNeeded().catch(() => {});
+        // Re-assert the section is at the top of the viewport in case any
+        // async work above scrolled the page.
+        await section.evaluate((el) => {
+          el.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' });
+        }).catch(() => {});
+        // Dismiss + force-hide the cookie banner so it doesn't obscure
+        // the bottom of the section in the evidence screenshot.
+        await suppressCookieBanner(materials, page);
         await page.screenshot({ path: sectionShot, fullPage: false });
         return sectionShot;
       },
@@ -173,11 +225,11 @@ function createPlanMaterialsFixture({
     pushSetupStep(setupSteps, {
       id: 2,
       name: `Navigate to ${scope.year} ${sectionLabel}`,
-      expected: `The "${scope.year} ${sectionLabel}" section should be located and the "${scope.accordion}" accordion should be visible in the viewport.`,
-      actual: `The "${scope.year} ${sectionLabel}" section was located and the "${scope.accordion}" accordion was scrolled into view.`,
+      expected: `The "${scope.year} ${sectionLabel}" section should be scrolled to the top of the viewport.`,
+      actual: `The "${scope.year} ${sectionLabel}" section heading was located and pinned to the top of the viewport for the evidence screenshot.`,
       status: 'PASS',
       screenshotPath: sectionRes.filePath,
-      screenshotLabel: `${scope.accordion} accordion visible under ${scope.year} ${sectionLabel}`,
+      screenshotLabel: `${scope.year} ${sectionLabel} section displayed`,
     });
 
     // Step 3 — Expand accordion
@@ -207,6 +259,9 @@ function createPlanMaterialsFixture({
     const anocRes = await ensureValidScreenshot(
       async () => {
         await accordion.container.scrollIntoViewIfNeeded().catch(() => {});
+        // Dismiss + force-hide the cookie banner so it doesn't obscure
+        // the accordion contents in the evidence screenshot.
+        await suppressCookieBanner(materials, page);
         await page.screenshot({ path: anocShot, fullPage: false });
         return anocShot;
       },
@@ -261,6 +316,61 @@ function createPlanMaterialsFixture({
             acceptDownloads: false,
           });
           await applyStealthScripts(rCtx);
+
+          // Install a popup-killer as an INIT SCRIPT (runs before any page
+          // script on every navigation). This uses a MutationObserver to
+          // hide Molina's ExternalSiteModal + cookie banners the instant
+          // they are added to the DOM — so accordion clicks on mobile can
+          // never be intercepted by a popup that appears mid-interaction.
+          await rCtx.addInitScript(() => {
+            const install = () => {
+              if (window.__molinaMobilePopupKiller) return;
+              window.__molinaMobilePopupKiller = true;
+              const hide = (el) => {
+                try {
+                  el.style.setProperty('display', 'none', 'important');
+                  el.style.setProperty('visibility', 'hidden', 'important');
+                  el.style.setProperty('pointer-events', 'none', 'important');
+                } catch { /* ignore */ }
+              };
+              const POPUP_SELECTORS = [
+                '[class^="ExternalSiteModal_"]',
+                '[class*="ExternalSiteModal_popup"]',
+                '#onetrust-banner-sdk',
+                '#CybotCookiebotDialog',
+                '#cookie-banner',
+                '[class*="cookie-banner"]',
+                '[class*="cookie-consent"]',
+                '[class*="consent-banner"]',
+              ];
+              const scan = (root) => {
+                try {
+                  root.querySelectorAll(POPUP_SELECTORS.join(',')).forEach(hide);
+                } catch { /* ignore */ }
+              };
+              scan(document);
+              try {
+                new MutationObserver((mutations) => {
+                  for (const m of mutations) {
+                    for (const node of m.addedNodes) {
+                      if (!(node instanceof HTMLElement)) continue;
+                      for (const sel of POPUP_SELECTORS) {
+                        try { if (node.matches(sel)) { hide(node); break; } }
+                        catch { /* ignore */ }
+                      }
+                      scan(node);
+                    }
+                  }
+                }).observe(document.documentElement, { childList: true, subtree: true });
+              } catch { /* ignore */ }
+            };
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', install, { once: true });
+            } else {
+              install();
+            }
+          });
+
           const rPage = await rCtx.newPage();
           const rMaterials = new PageClass(rPage);
           await rMaterials.open(scope.appUrl, frameworkConfig.navigationTimeoutMs);
@@ -284,6 +394,43 @@ function createPlanMaterialsFixture({
           }
 
           const shotPath = path.join(screenshotsDir, `Responsive_${key}.png`);
+          // Hide any popups that would obscure the accordion contents in
+          // the mobile viewport (cookie banner + Molina's ExternalSiteModal
+          // "You are leaving..." confirmation). This is a fast, synchronous
+          // page.evaluate — no frame iteration, no observers, no clicks —
+          // so it can't hang the mobile emulation flow.
+          await rPage.evaluate(() => {
+            const forceHide = (el) => {
+              try {
+                el.style.setProperty('display', 'none', 'important');
+                el.style.setProperty('visibility', 'hidden', 'important');
+              } catch { /* ignore */ }
+            };
+            // Molina ExternalSiteModal ("You are leaving the Molina...")
+            document.querySelectorAll(
+              '[class^="ExternalSiteModal_"], [class*="ExternalSiteModal_popup"]'
+            ).forEach(forceHide);
+            // Cookie banners
+            document.querySelectorAll(
+              '#onetrust-banner-sdk, #CybotCookiebotDialog, #cookie-banner, ' +
+              '[class*="cookie-banner"], [class*="cookie-consent"], [class*="consent-banner"]'
+            ).forEach(forceHide);
+            // Any fixed/sticky element whose text starts with "cookie" or
+            // "you are leaving" (catches Molina's specific-class banners
+            // whose class names don't match the generic selectors above).
+            document.querySelectorAll('div, section, aside').forEach((el) => {
+              const style = window.getComputedStyle(el);
+              if (style.position !== 'fixed' && style.position !== 'sticky') return;
+              const txt = (el.innerText || '').trim().toLowerCase();
+              if (!txt) return;
+              if (txt.startsWith('cookies message')
+                  || txt.startsWith('cookie ')
+                  || txt.startsWith('we use cookies')
+                  || txt.startsWith('you are leaving')) {
+                forceHide(el);
+              }
+            });
+          }).catch(() => { /* best-effort */ });
           // Viewport screenshot (not full-page) — matches what the user sees
           // on the device and keeps the report image compact.
           await rPage.screenshot({ path: shotPath, fullPage: false });

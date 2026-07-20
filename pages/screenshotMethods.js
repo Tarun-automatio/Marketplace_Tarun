@@ -14,7 +14,33 @@ const { waitForDomStable } = require('../utils/asyncHelpers');
 const { RESPONSIVE_DEVICES } = require('./selectors');
 
 module.exports = {
-  async saveScreenshot(filePath) {
+  /**
+   * Take a stable, DOM-quiescent screenshot with a URL-bar overlay at the top.
+   *
+   * @param {string} filePath — output path (png)
+   * @param {object} [options]
+   * @param {boolean} [options.fullPage=true] — pass `false` for a viewport-sized
+   *   screenshot instead of the full scrollable page. Viewport-only shots are
+   *   preferred for step-by-step evidence in flows where each step is a
+   *   single-viewport action (e.g. marketplace nav flow).
+   * @param {boolean} [options.preserveScroll=false] — when true, do NOT reset
+   *   the page's scroll position to (0, 0) before capture. Used when the
+   *   caller has already scrolled a specific section into view and wants
+   *   that section to be visible in the screenshot (e.g. marketplace Steps
+   *   4–6 scroll to the "All Forms & Documents" section before the shot).
+   *   Existing callers (plan-materials, drug) don't pass this so scroll
+   *   reset happens as before — behaviour is 100% back-compatible.
+   */
+  async saveScreenshot(filePath, options = {}) {
+    const fullPage = options.fullPage !== false; // default true (back-compat)
+    const preserveScroll = options.preserveScroll === true;
+    // Capture the caller's scroll position up front so we can restore it
+    // right before the actual shot — several internal helpers below
+    // (`_waitForPageStable`, `_hideFixedElementsForScreenshot`, etc.)
+    // scroll the page for their own purposes and end up at (0, 0).
+    const savedScroll = preserveScroll
+      ? await this.page.evaluate(() => ({ x: window.scrollX, y: window.scrollY })).catch(() => null)
+      : null;
     await Promise.all([
       this.dismissAllPopups(),
       this.acceptCookiesIfPresent(),
@@ -23,7 +49,9 @@ module.exports = {
     await this.nukeAllPopups();
     await this._waitForPageStable();
     await this._hideFixedElementsForScreenshot();
-    await this.page.evaluate(() => window.scrollTo(0, 0));
+    if (!preserveScroll) {
+      await this.page.evaluate(() => window.scrollTo(0, 0));
+    }
     await waitForDomStable(this.page, { stableMs: 100, timeoutMs: 1000 });
 
     // Replace <video> elements with static images to avoid black rectangles
@@ -74,19 +102,31 @@ module.exports = {
     }).catch(() => {});
     await waitForDomStable(this.page, { stableMs: 150, timeoutMs: 1500 });
 
-    // Inject URL bar at page top
+    // Inject URL bar at page top. When preserving scroll position, use
+    // position:fixed so the bar overlays the viewport top instead of
+    // sitting at document Y=0 (which would be off-screen when scrolled).
     const pageUrl = this.page.url();
-    await this.page.evaluate((url) => {
+    await this.page.evaluate(({ url, useFixed }) => {
       const bar = document.createElement('div');
       bar.id = '__url_bar_overlay__';
       bar.textContent = url;
-      bar.style.cssText = 'position:relative;z-index:2147483647;background:#f1f3f4;color:#333;' +
+      const positionCss = useFixed
+        ? 'position:fixed;top:0;left:0;right:0;'
+        : 'position:relative;';
+      bar.style.cssText = positionCss + 'z-index:2147483647;background:#f1f3f4;color:#333;' +
         'font:13px/1.4 "Segoe UI",Roboto,Arial,sans-serif;padding:6px 14px;' +
         'border-bottom:1px solid #ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
       document.body.insertBefore(bar, document.body.firstChild);
-    }, pageUrl);
+    }, { url: pageUrl, useFixed: preserveScroll });
+    // Restore the caller's scroll position right before the shot so any
+    // internal scroll-to-top calls above are undone. Only fires when
+    // preserveScroll was requested.
+    if (preserveScroll && savedScroll) {
+      await this.page.evaluate(({ x, y }) => window.scrollTo(x, y), savedScroll).catch(() => {});
+      await waitForDomStable(this.page, { stableMs: 100, timeoutMs: 500 });
+    }
     logger.debug('SCREENSHOT', `Capturing screenshot: ${filePath}`);
-    await this.page.screenshot({ path: filePath, fullPage: true });
+    await this.page.screenshot({ path: filePath, fullPage });
     await this.page.evaluate(() => {
       const bar = document.getElementById('__url_bar_overlay__');
       if (bar) bar.remove();

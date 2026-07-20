@@ -2,10 +2,11 @@
 
 Playwright framework for Molina Medicare PDF validation.
 
-Two suites:
+Three suites:
 
 - **Plan Materials** — validates Annual Notice of Change (ANOC), Summary of Benefits (SOB), Evidence of Coverage (EOC) etc. under the *<YEAR> Plan Materials* section.
 - **Drug / Pharmacy** — validates Comprehensive Formulary, Prior Authorization Grid, Step Therapy Grid etc. under the *<YEAR> Pharmacy and Prescription Benefits Documents* section.
+- **Marketplace** — validates the 2026/2027 coverage-year toggle on the *Member Resources → Forms & Documents* page across states, languages (English / Spanish), and devices (Desktop / iPhone SE / iPad Pro).
 
 ---
 
@@ -40,9 +41,20 @@ Run all commands from the framework root (`PlanMaterialAutomation/`).
 
 ---
 
+## Run commands — Marketplace
+
+"npm run test:marketplace" : Cleans old artifacts and runs the marketplace suite in headless mode
+
+"npm run test:marketplace:headed" : Same run, but with a visible Chrome window
+
+Each row in the Marketplace data sheet where `Run=Y` is auto-multiplied across three device profiles — **Desktop**, **iPhone SE**, and **iPad Pro** — so 1 sheet row = 3 test cases (Desktop + 2 responsive). English rows load the base URL; Spanish (`Language=es`) rows load `/es-us/…` and preserve the language through navigation.
+
+
+---
+
 ## Run both suites
 
-"npm run test:all" : Runs every spec under `tests/` (plan-materials + drug)
+"npm run test:all" : Runs every spec under `tests/` (plan-materials + drug + marketplace)
 
 ---
 
@@ -60,8 +72,15 @@ Each suite is driven by an Excel workbook. Add rows and set `Run=Y` to enable th
 
 - Plan Materials → `data/PlanMaterialsData.xlsx`  (sheet `Plans`)
 - Drug / Pharmacy → `data/DrugPageData.xlsx`  (sheet `Plans`)
+  - Columns: `Run, State, Year, Accordion, PlanName, ExpectedUrl`
+- Marketplace → `data/MarketplaceData.xlsx`  (sheet `Marketplace`)
+  - Columns: `Run, State, Language, DefaultYear, AlternateYear, AppUrl, TestId, Notes`
+  - `Language`: `en` or `es` (Spanish auto-prepends `/es-us` to the URL)
+  - `AppUrl`: leave blank to use the `MARKETPLACE_URL` env default
+  - `TestId`: shown in the report header and used as the HTML report filename
+  - Each `Run=Y` row expands to 3 test cases (Desktop + iPhone SE + iPad Pro)
 
-Columns: `Run, State, Year, Accordion, PlanName, ExpectedUrl`
+Reports land under `reports/<suite>/<slug>/` with their own HTML file and a matching `.zip` bundle.
 
 ---
 

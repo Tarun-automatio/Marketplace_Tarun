@@ -11,6 +11,8 @@
     "test:debug": "cross-env LOG_LEVEL=DEBUG npm run test",
     "test:drug": "playwright test tests/drugs/drugs.spec.js",
     "test:drug:headed": "playwright test tests/drugs/drugs.spec.js --workers=1 --headed",
+    "test:marketplace": "playwright test tests/marketplace/marketplace.spec.js",
+    "test:marketplace:headed": "playwright test tests/marketplace/marketplace.spec.js --workers=1 --headed",
     "test:all": "playwright test",
     "report:open": "start reports/plan-materials/PlanMaterials_ANOC_Report.html"
   },

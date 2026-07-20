@@ -193,6 +193,41 @@ const config = {
       dir: path.join(process.cwd(), env('DRUG_REPORT_DIR', 'reports/drug')),
     },
   },
+
+  // ── Marketplace suite (Requirement 3) ──────────────────────────────────
+  // Molina Marketplace home → Member Resources → Forms & Documents flow.
+  // Verifies the default & alternate coverage year query-param toggling.
+  // This flow is linear (no plan matrix, no PDF validation) so it is much
+  // smaller than the plan-materials / drug config blocks above.
+  marketplace: {
+    urls: {
+      appUrl: env('MARKETPLACE_URL', 'https://pws-q3.molinahealthcare.com/'),
+    },
+    // Data-driven matrix source. Rows where `Run=Y` become individual test
+    // cases (one per state × year pair). If the sheet is missing, unreadable,
+    // or has zero Run=Y rows, the suite runs zero tests — flip a row's Run
+    // cell to 'Y' to include it.
+    excelPath:  env('MARKETPLACE_EXCEL',       path.join(process.cwd(), 'data', 'MarketplaceData.xlsx')),
+    excelSheet: env('MARKETPLACE_EXCEL_SHEET', 'Marketplace'),
+    // State to pick in the Forms & Documents dropdown (2-letter code, matches
+    // the <option value> attribute — e.g. "tx", "ca", "az").
+    state: env('MARKETPLACE_STATE', 'tx'),
+    // Coverage years the test verifies. `default` is the initially-selected
+    // year expected on page load; `alternate` is the year the test toggles to.
+    years: {
+      default:   env('MARKETPLACE_DEFAULT_YEAR',   '2026'),
+      alternate: env('MARKETPLACE_ALTERNATE_YEAR', '2027'),
+    },
+    test: {
+      id:          env('MARKETPLACE_TEST_ID',     'MP-COVYEAR-001'),
+      module:      env('MARKETPLACE_TEST_MODULE', 'Marketplace / Forms & Documents'),
+      author:      env('MARKETPLACE_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('MARKETPLACE_TEST_ENVIRONMENT', ''),  // '' → auto-detect from URL
+    },
+    report: {
+      dir: path.join(process.cwd(), env('MARKETPLACE_REPORT_DIR', 'reports/marketplace')),
+    },
+  },
 };
 
 module.exports = config;
