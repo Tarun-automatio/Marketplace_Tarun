@@ -11,9 +11,13 @@
  *     slim dashboard at `reports/marketplace-plans/Consolidated.html`
  *     with filters + expandable per-URL details (no screenshots embedded
  *     so it scales cleanly to 100+ plans).
+ *   • Drug / Pharmacy suite → aggregate all
+ *     `reports/drug/<TCxxx>/` per-scope reports into ONE slim dashboard
+ *     at `reports/drug/Consolidated.html` (same shape as plan-search;
+ *     filters by state / accordion / status).
  *
- * Both consolidated reports are purely ADDITIVE — the per-variant and
- * per-plan standalone HTML reports are left untouched so any bookmarks
+ * All consolidated reports are purely ADDITIVE — the per-variant, per-plan
+ * and per-scope standalone HTML reports are left untouched so any bookmarks
  * or previously shared links continue to work.
  *
  * Never throws — a teardown failure must not fail an otherwise passing
@@ -23,6 +27,7 @@
 const path = require('path');
 const { generateMarketplaceSummaries } = require('./marketplaceSummary');
 const { generatePlansDashboard }       = require('./marketplacePlansSummary');
+const { generateDrugDashboard }        = require('./drugSummary');
 
 module.exports = async function globalTeardown() {
   // ── Marketplace toggle-check consolidated report (per state) ──────────
@@ -37,17 +42,31 @@ module.exports = async function globalTeardown() {
     console.error(`[TEARDOWN] Marketplace toggle-check summary failed: ${err && err.message}`);
   }
 
-  // ── Marketplace plan-search consolidated dashboard (single file) ──────
+  // ── Marketplace plan-search consolidated dashboard (per state) ────────
   const plansDir = path.join(process.cwd(), 'reports', 'marketplace-plans');
   try {
-    const { file, count } = generatePlansDashboard({ rootDir: plansDir });
+    const { written, count } = generatePlansDashboard({ rootDir: plansDir });
     if (count > 0) {
-      console.log(`[TEARDOWN] Marketplace plan-search dashboard written (${count} plan${count === 1 ? '' : 's'}):`);
-      console.log(`  \u2022 ${file}`);
+      console.log(`[TEARDOWN] Marketplace plan-search dashboards written (${written.length} state file${written.length === 1 ? '' : 's'}, ${count} plan${count === 1 ? '' : 's'} total):`);
+      for (const w of written) console.log(`  \u2022 ${w.file}  (${w.count} plan${w.count === 1 ? '' : 's'})`);
     } else {
-      console.log('[TEARDOWN] No plan-search variant.json files found — dashboard skipped.');
+      console.log('[TEARDOWN] No plan-search variant.json files found \u2014 dashboard skipped.');
     }
   } catch (err) {
     console.error(`[TEARDOWN] Marketplace plan-search dashboard failed: ${err && err.message}`);
+  }
+
+  // ── Drug / Pharmacy consolidated dashboard (per state) ────────────────
+  const drugDir = path.join(process.cwd(), 'reports', 'drug');
+  try {
+    const { written, count } = generateDrugDashboard({ rootDir: drugDir });
+    if (count > 0) {
+      console.log(`[TEARDOWN] Drug / Pharmacy dashboards written (${written.length} state file${written.length === 1 ? '' : 's'}, ${count} scope${count === 1 ? '' : 's'} total):`);
+      for (const w of written) console.log(`  \u2022 ${w.file}  (${w.count} scope${w.count === 1 ? '' : 's'})`);
+    } else {
+      console.log('[TEARDOWN] No drug variant.json files found \u2014 dashboard skipped.');
+    }
+  } catch (err) {
+    console.error(`[TEARDOWN] Drug / Pharmacy dashboard failed: ${err && err.message}`);
   }
 };

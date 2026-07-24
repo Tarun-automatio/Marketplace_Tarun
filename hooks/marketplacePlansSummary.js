@@ -179,15 +179,23 @@ function renderDashboardHtml(plans) {
   const totalDurationMs = plans.reduce((s, p) => s + (Number(p.data.durationMs) || 0), 0);
   const overall = failed === 0 && total > 0 ? 'PASS' : 'FAIL';
 
-  // Aggregate PDF stats across all plans.
+  // Aggregate PDF stats + per-state breakdown across all plans.
   let totalCards = 0, passedCards = 0;
   const statesSet = new Set();
   const labelsSet = new Set();
+  const stateStats = new Map();   // state -> { total, passed, failed }
   for (const p of plans) {
     const cards = p.data.planCards || [];
     totalCards  += cards.length;
     passedCards += cards.filter(c => c.status === 'PASS').length;
-    if (p.data.state) statesSet.add(String(p.data.state).toUpperCase());
+    const st = p.data.state ? String(p.data.state).toUpperCase() : '';
+    if (st) {
+      statesSet.add(st);
+      const bucket = stateStats.get(st) || { total: 0, passed: 0, failed: 0 };
+      bucket.total += 1;
+      if (p.data.status === 'PASS') bucket.passed += 1; else bucket.failed += 1;
+      stateStats.set(st, bucket);
+    }
     (cards || []).forEach(c => {
       const l = labelFromCardName(c.name);
       if (l) labelsSet.add(l);
@@ -195,6 +203,11 @@ function renderDashboardHtml(plans) {
   }
   const states = [...statesSet].sort();
   const labels = [...labelsSet].sort();
+
+  // Human-readable state summary for the title.
+  const stateTitle = states.length === 0 ? ''
+                   : states.length <= 4 ? ` (${states.join(', ')})`
+                   : ` (${states.length} states)`;
 
   const rowsHtml = plans.map(renderPlanRow).join('');
   const timestamp = new Date().toLocaleString();
@@ -325,6 +338,15 @@ function renderDashboardHtml(plans) {
     .muted { color: var(--muted); font-style: italic; }
     .footer { text-align:center; color: var(--muted); font-size:.75rem; margin-top:32px; }
 
+    /* Per-state summary strip */
+    .state-strip { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px 14px; background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom:14px; }
+    .state-strip-label { font-size:.72rem; text-transform:uppercase; letter-spacing:.5px; color: var(--muted); font-weight:700; margin-right:4px; }
+    .state-pill { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:14px; font-weight:700; font-size:.82rem; cursor:pointer; border:1px solid transparent; transition: transform .12s, box-shadow .12s; }
+    .state-pill.ok  { background: var(--pass-bg); color: var(--pass); }
+    .state-pill.bad { background: var(--fail-bg); color: var(--fail); }
+    .state-pill:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,.10); }
+    .state-pill .state-count { font-family:'Consolas','Menlo',monospace; font-size:.75rem; opacity:.85; font-weight:700; }
+
     @media print {
       .sticky-summary, .toolbar, .filter-bar, .expand-btn { display:none !important; }
       .plan-details { display:table-row !important; }
@@ -352,7 +374,7 @@ function renderDashboardHtml(plans) {
     <section class="test-details">
       <div class="td-eyebrow">Consolidated Dashboard</div>
       <div class="td-title-row">
-        <h2 class="td-title">Marketplace Plan Search \u2014 All Plans</h2>
+        <h2 class="td-title">Marketplace Plan Search — All Plans${esc(stateTitle)}</h2>
         <span class="badge badge-${overall === 'PASS' ? 'ok' : 'bad'}">${overall}</span>
       </div>
       <p class="td-desc">Overview of every plan-search test run. Use the filters below to narrow by status, state or document type; click a row's arrow to see the per-URL PASS/FAIL breakdown inline. Screenshots and step-level evidence stay in each plan's standalone report \u2014 click "Open \u2192" on any row to open it.</p>
@@ -363,8 +385,18 @@ function renderDashboardHtml(plans) {
       <div class="kpi ok"><div class="kpi-label">Passed</div><div class="kpi-value">${passed}</div><div class="kpi-sub">${total ? Math.round((passed / total) * 100) : 0}% pass-rate</div></div>
       <div class="kpi ${failed ? 'bad' : ''}"><div class="kpi-label">Failed</div><div class="kpi-value">${failed}</div></div>
       <div class="kpi ${(passedCards === totalCards && totalCards > 0) ? 'ok' : 'bad'}"><div class="kpi-label">PDF URLs</div><div class="kpi-value">${passedCards} / ${totalCards}</div><div class="kpi-sub">matched / total</div></div>
+      <div class="kpi info"><div class="kpi-label">States covered</div><div class="kpi-value">${states.length}</div><div class="kpi-sub">${esc(states.join(', ') || '—')}</div></div>
       <div class="kpi"><div class="kpi-label">Total duration</div><div class="kpi-value">${esc(fmtDuration(totalDurationMs))}</div></div>
     </div>
+
+    ${states.length ? `<div class="state-strip">
+      <div class="state-strip-label">Per-state breakdown:</div>
+      ${states.map(st => {
+        const b = stateStats.get(st);
+        const ok = b.failed === 0;
+        return `<span class="state-pill ${ok ? 'ok' : 'bad'}" onclick="filterByState('${esc(st)}')" title="Click to filter by ${esc(st)}">${esc(st)} <span class="state-count">${b.passed}/${b.total}</span></span>`;
+      }).join('')}
+    </div>` : ''}
 
     <div class="filter-bar">
       <input type="search" id="fSearch" class="search-in" placeholder="Search by TestId, plan, state, doc-type\u2026" autocomplete="off"/>
@@ -460,6 +492,12 @@ function renderDashboardHtml(plans) {
         search.value = ''; status.value = ''; state.value = ''; label.value = '';
         apply();
       };
+      // Called by the per-state summary pills at the top of the page.
+      window.filterByState = function (st) {
+        state.value = st === state.value ? '' : st;   // toggle if already selected
+        apply();
+        document.getElementById('plansTable').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
       ['input','change'].forEach(function (evt) {
         search.addEventListener(evt, apply);
         status.addEventListener(evt, apply);
@@ -477,11 +515,41 @@ function renderDashboardHtml(plans) {
 
 function generatePlansDashboard({ rootDir }) {
   const plans = discoverPlans(rootDir);
-  const html  = renderDashboardHtml(plans);
-  const file  = path.join(rootDir, 'Consolidated.html');
   fs.mkdirSync(rootDir, { recursive: true });
-  fs.writeFileSync(file, html, 'utf8');
-  return { file, count: plans.length };
+
+  // Group plans by their `state` field. Plans without a state fall into a
+  // synthetic '_UNKNOWN' bucket that becomes `Consolidated.html`.
+  const groups = new Map();  // state -> plans[]
+  for (const p of plans) {
+    const st = String(p.data.state || '').trim().toUpperCase() || '_UNKNOWN';
+    if (!groups.has(st)) groups.set(st, []);
+    groups.get(st).push(p);
+  }
+
+  // Clean any stale Consolidated*.html from previous runs that isn't part
+  // of the current state set (avoids orphaned files when the state set
+  // shrinks between runs).
+  const currentFiles = new Set(
+    [...groups.keys()].map(st => st === '_UNKNOWN' ? 'Consolidated.html' : `Consolidated-${st}.html`)
+  );
+  try {
+    for (const f of fs.readdirSync(rootDir)) {
+      if (/^Consolidated.*\.html$/i.test(f) && !currentFiles.has(f)) {
+        try { fs.unlinkSync(path.join(rootDir, f)); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* rootDir might not be readable — non-fatal */ }
+
+  const written = [];
+  for (const [state, statePlans] of groups) {
+    const html = renderDashboardHtml(statePlans);
+    const filename = state === '_UNKNOWN' ? 'Consolidated.html' : `Consolidated-${state}.html`;
+    const file = path.join(rootDir, filename);
+    fs.writeFileSync(file, html, 'utf8');
+    written.push({ file, state: state === '_UNKNOWN' ? '' : state, count: statePlans.length });
+  }
+
+  return { written, count: plans.length };
 }
 
 module.exports = { generatePlansDashboard };

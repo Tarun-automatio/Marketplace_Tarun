@@ -650,6 +650,79 @@ class MarketplacePage {
     return this.page.url();
   }
 
+  // ─── Language switcher (top-right header) ──────────────────────────────
+  //
+  // Molina exposes a Language dropdown in the top-right of the site header:
+  //   <button aria-label="Language">Language <span>ES/EN</span> ▼</button>
+  //   <ul role="menu">
+  //     <li><button>English</button></li>
+  //     <li><button>Spanish</button></li>
+  //   </ul>
+  //
+  // Selecting Spanish navigates to `/es-us/…` (path prefix), English removes
+  // the prefix. Both trigger a full re-render, so we wait for the URL and
+  // DOM to stabilise before returning.
+  //
+  // Idempotent: if the site is already in the requested language this is a
+  // no-op that logs and returns immediately.
+
+  languageToggleButton() {
+    return this.page.locator(
+      'button[aria-label="Language" i], '
+      + 'button[aria-label*="Language" i], '
+      + 'button:has-text("Language")'
+    ).first();
+  }
+
+  /** Read the current UI language from the URL — 'es' when `/es-us` path prefix is present, 'en' otherwise. */
+  currentLanguage() {
+    return /\/es-us\//i.test(this.page.url()) ? 'es' : 'en';
+  }
+
+  /**
+   * Switch the site UI language via the header dropdown. Accepts:
+   *   'en' | 'english'  → English
+   *   'es' | 'spanish'  → Spanish
+   *
+   * Idempotent (no-op when already in the target language).
+   * Waits for the URL prefix to reflect the change AND for the DOM to settle.
+   */
+  async switchLanguage(target) {
+    const wantEs = /^(es|spanish)$/i.test(String(target || ''));
+    const current = this.currentLanguage();
+    if ((wantEs && current === 'es') || (!wantEs && current === 'en')) {
+      logger.info(this.logTag, `Language already set to ${wantEs ? 'Spanish' : 'English'} — no switch needed`);
+      return;
+    }
+
+    const btn = this.languageToggleButton();
+    await btn.waitFor({ state: 'visible', timeout: frameworkConfig.elementInteractionTimeoutMs });
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    await btn.click();
+
+    // Dropdown option — "English" or "Spanish".
+    const optionText = wantEs ? 'Spanish' : 'English';
+    const option = this.page.locator(
+      `button:has-text("${optionText}"), `
+      + `a:has-text("${optionText}"), `
+      + `[role="menuitem"]:has-text("${optionText}"), `
+      + `li:has-text("${optionText}")`
+    ).first();
+    await option.waitFor({ state: 'visible', timeout: frameworkConfig.elementInteractionTimeoutMs });
+    await option.click();
+
+    // Wait for the URL to reflect the language change. Spanish adds
+    // `/es-us`, English removes it.
+    const targetRe = wantEs ? /\/es-us\//i : /^(?!.*\/es-us\/)/;
+    await this.page.waitForURL(targetRe, { timeout: frameworkConfig.pageLoadWaitMs }).catch(() => {});
+    await this.page.waitForLoadState('domcontentloaded').catch(() => {});
+    await waitForDomStable(this.page, {
+      stableMs: frameworkConfig.domStableMs,
+      timeoutMs: frameworkConfig.domStableTimeoutMs,
+    });
+    logger.info(this.logTag, `Switched language to ${wantEs ? 'Spanish' : 'English'} — URL: ${this.page.url()}`);
+  }
+
   // ─── Filter accordion (Audience / Category) ────────────────────────────
   //
   // The Forms & Documents page renders each filter as an accordion panel:

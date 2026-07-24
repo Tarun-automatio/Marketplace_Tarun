@@ -377,6 +377,54 @@ function registerTestsForScope(scope) {
           timestamp: new Date().toLocaleString(),
         });
         logger.info('REPORT', `[${scopeLabel}] Report written: ${reportFile}`);
+
+        // Also emit a small companion JSON so hooks/drugSummary.js can build
+        // the consolidated dashboard without having to parse each per-scope
+        // HTML report (which can be several MB with embedded PNGs).
+        try {
+          const setupFailed = setupSteps.some(s => s.status === 'FAIL');
+          const cardFailed  = planCards.some(c => c.status === 'FAIL');
+          const overallStatus = (setupFailed || cardFailed) ? 'FAIL' : (planCards.length ? 'PASS' : 'FAIL');
+          const variantJson = path.join(scopeDir, 'variant.json');
+          fs.writeFileSync(variantJson, JSON.stringify({
+            schemaVersion: 1,
+            testId:      scope.testId || TEST_ID,
+            state:       scope.state,
+            year:        String(scope.year),
+            accordion:   scope.accordion,
+            appUrl:      scope.appUrl,
+            status:      overallStatus,
+            durationMs,
+            testName,
+            testDescription,
+            setupSteps:  setupSteps.map(s => ({
+              id:         s.id,
+              name:       s.name,
+              status:     s.status,
+              durationMs: s.durationMs,
+              expected:   (s.expected || '').substring(0, 500),
+              actual:     (s.actual   || '').substring(0, 800),
+            })),
+            planCards:   planCards.map(c => ({
+              id:          c.id,
+              name:        c.name,
+              status:      c.status,
+              expectedUrl: c.expectedUrl,
+              pdfUrl:      c.pdfUrl,
+              href:        c.href,
+              error:       c.error,
+              validations: (c.validations || []).map(v => ({
+                name:        v.name,
+                status:      v.status,
+                description: (v.description || '').substring(0, 300),
+              })),
+            })),
+            reportFile: path.relative(path.join(process.cwd(), 'reports', 'drug'), reportFile)
+                              .split(path.sep).join('/'),
+          }, null, 2), 'utf8');
+        } catch (jsonErr) {
+          logger.warn('REPORT', `[${scopeLabel}] Variant JSON write failed: ${jsonErr.message.substring(0, 160)}`);
+        }
       } catch (repErr) {
         logger.warn('REPORT', `[${scopeLabel}] Failed to write report: ${repErr.message}`);
       }

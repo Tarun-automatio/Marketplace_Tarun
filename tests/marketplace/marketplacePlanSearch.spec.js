@@ -599,15 +599,79 @@ function registerScope(scope) {
         //
         // Plan-card names are prefixed with `[<Label>]` so the report
         // clearly groups SBC vs SOB (or whatever document types are used).
+        //
+        // Two language passes are run back-to-back on the SAME page (no
+        // re-navigation from the home page for Spanish):
+        //   1. English pass  — filter + search + verify for every search
+        //   2. Language switch step (clicks the header Language dropdown)
+        //   3. Spanish pass  — same searches repeated, labels get " · ES"
+        // Plan-card names use [<Label> · EN] / [<Label> · ES] so the report
+        // clearly separates the two language halves.
         let planCardIndex = 0;
         let stepId = 6;
-        let prevAudience = null;
-        let prevCategory = null;
 
-        for (let searchIdx = 0; searchIdx < scope.searches.length; searchIdx++) {
-          const search = scope.searches[searchIdx];
-          const isFirst = searchIdx === 0;
-          const label = search.label || `Search ${searchIdx + 1}`;
+        // Each language pass resets its own filter state because the site
+        // may drop the Audience/Category selection when the URL prefix
+        // changes on language switch.
+        const languagePasses = [
+          { code: 'en', label: 'EN', switchBefore: false },
+          { code: 'es', label: 'ES', switchBefore: true  },
+        ];
+
+        for (const pass of languagePasses) {
+          // ── Optional language switch between passes ─────────────────
+          if (pass.switchBefore) {
+            const switchStepId = stepId++;
+            await base.step(`Step ${switchStepId} — Switch site language to Spanish`, async () => {
+              const t0 = Date.now();
+              let ok = true;
+              let errMsg = '';
+              const urlBefore = page.url();
+              try {
+                await marketplace.switchLanguage('es');
+                await marketplace.scrollToAllFormsAndDocuments();
+              } catch (err) {
+                ok = false;
+                errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
+              }
+              const urlAfter = page.url();
+              const urlOk = /\/es-us\//i.test(urlAfter);
+              const passStatus = ok && urlOk;
+
+              const shot = path.join(screenshotsDir, `Step${switchStepId}_LanguageSwitch_ES.png`);
+              await marketplace.saveScreenshot(shot, { preserveScroll: true });
+              pushSetupStep(setupSteps, {
+                id: switchStepId,
+                name: 'Switch site language to Spanish',
+                expected: 'Language dropdown should open and selecting "Spanish" should navigate to a URL containing "/es-us/".',
+                actual: passStatus
+                  ? `Language switched to Spanish successfully.\nURL before: ${urlBefore}\nURL after:  ${urlAfter}`
+                  : ok
+                    ? `Clicked "Spanish" but URL did not switch to /es-us/. URL after: ${urlAfter}`
+                    : `Failed to switch language: ${errMsg}`,
+                status: passStatus ? 'PASS' : 'FAIL',
+                durationMs: Date.now() - t0,
+                screenshotPath: shot,
+                screenshotLabel: 'Site language switched to Spanish',
+              });
+              if (!passStatus) throw new Error(`Language switch to Spanish failed: ${errMsg || 'URL still English'}`);
+            });
+          }
+
+          // Filter state is per-pass — the language switch may reset the
+          // Audience / Category UI, so treat each pass's first search as
+          // a fresh "apply filters" step.
+          let prevAudience = null;
+          let prevCategory = null;
+
+          for (let searchIdx = 0; searchIdx < scope.searches.length; searchIdx++) {
+            const search = scope.searches[searchIdx];
+            const isFirst = searchIdx === 0;
+            const baseLabel = search.label || `Search ${searchIdx + 1}`;
+            // Label used everywhere (step titles, screenshot filenames,
+            // plan-card prefixes) — includes the language tag so EN and
+            // ES artefacts never overwrite one another.
+            const label = `${baseLabel} · ${pass.label}`;
 
           // ── Filter application / transition ─────────────────────────
           const filterStepId = stepId++;
@@ -653,7 +717,7 @@ function registerScope(scope) {
 
             const expected = isFirst
               ? `Audience "${search.audience}" and Category "${search.category}" filters should be applied for [${label}].`
-              : `Filters should transition from [${scope.searches[searchIdx - 1].label || `Search ${searchIdx}`}] to [${label}]: uncheck Audience="${prevAudience}", check Audience="${search.audience}" (Category unchanged).`;
+              : `Filters should transition from [${(scope.searches[searchIdx - 1].label || `Search ${searchIdx}`) + ' · ' + pass.label}] to [${label}]: uncheck Audience="${prevAudience}", check Audience="${search.audience}" (Category unchanged).`;
             const actualDone = actions.length ? actions.join('; ') : 'no filter changes required';
             pushSetupStep(setupSteps, {
               id: filterStepId,
@@ -763,7 +827,8 @@ function registerScope(scope) {
               planCards,
             });
           }
-        }
+        }  // end inner for-searchIdx (searches within a language pass)
+        }  // end outer for-pass (language passes: EN, then ES)
 
         // If any plan card failed, fail the whole test so CI catches it.
         const failed = planCards.filter(c => c.status === 'FAIL');
