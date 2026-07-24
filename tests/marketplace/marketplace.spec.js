@@ -19,7 +19,7 @@
  *   • A framework-style screenshot is captured after each step and
  *     attached to the test via `testInfo.attach()` so it also renders
  *     inline in the report. The same file is written to
- *     `reports/marketplace/<runid>/screenshots/*.png` for standalone review.
+ *     `reports/marketplace-toggleCheck/<runid>/screenshots/*.png` for standalone review.
  *
  * Framework reuse (nothing new was introduced for this suite):
  *   • pages/marketplacePage.js — page object (nav / dropdown / year buttons)
@@ -39,7 +39,7 @@ const logger = require('../../utils/logger');
 const { launchFreshBrowser, cleanupBetweenTests, applyStealthScripts } =
   require('../../utils/browserHelper');
 const { MarketplacePage } = require('../../pages/marketplacePage');
-const { writeStepsReport, packageReport } = require('../../reporting/reportGenerator');
+const { writeStepsReport } = require('../../reporting/reportGenerator');
 
 // ══════════════════════════════════════════════════════════════════════════
 // Test-matrix loader
@@ -563,12 +563,32 @@ test.describe.serial('Marketplace · Forms & Documents · Coverage Year', () => 
         });
         logger.info('MARKETPLACE', `Report written: ${reportPath}`);
 
-        // Best-effort ZIP the report folder so it's easy to email / attach.
+        // Also emit a companion JSON so the state-level consolidated report
+        // generator (hooks/marketplaceSummary.js) can rebuild each variant's
+        // steps + screenshots into one shareable file per state without
+        // having to parse HTML back out of the per-variant reports.
         try {
-          const zip = packageReport(RUN_DIR);
-          if (zip) logger.info('MARKETPLACE', `Report zipped: ${zip}`);
-        } catch (zipErr) {
-          logger.warn('MARKETPLACE', `ZIP packaging failed: ${zipErr.message.substring(0, 120)}`);
+          const variantJsonPath = path.join(RUN_DIR, 'variant.json');
+          const overallStatus = reportSteps.some(s => s.status === 'FAIL') ? 'FAIL' : 'PASS';
+          fs.writeFileSync(variantJsonPath, JSON.stringify({
+            schemaVersion: 1,
+            state:         STATE,
+            lang:          LANG_TAG,      // 'EN' | 'ES'
+            langLabel:     LANG_LABEL,    // 'English' | 'Spanish'
+            device:        DEVICE_TAG,    // 'Desktop' | 'iPhoneSE' | 'iPadPro'
+            deviceLabel:   DEVICE_LABEL,
+            defaultYear:   String(DEFAULT_YEAR),
+            altYear:       String(ALT_YEAR),
+            status:        overallStatus,
+            durationMs:    Date.now() - runStart,
+            appUrl:        APP_URL,
+            testMeta:      TEST_META,
+            steps:         reportSteps,
+            reportFile:    path.relative(path.join(process.cwd(), 'reports', 'marketplace'), REPORT_FILE)
+                                .split(path.sep).join('/'),
+          }, null, 2), 'utf8');
+        } catch (jsonErr) {
+          logger.warn('MARKETPLACE', `Variant JSON write failed: ${jsonErr.message.substring(0, 160)}`);
         }
       } catch (reportErr) {
         logger.warn('MARKETPLACE', `Report generation failed: ${reportErr.message.substring(0, 200)}`);

@@ -106,6 +106,20 @@ function renderThumbnail(title, filePath, imageIndex, opts = {}) {
 }
 
 /**
+ * Compact human-readable duration string: "420ms" / "3.2s" / "28s" / "1m 4s".
+ */
+function formatShortDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000)   return `${Math.round(n)}ms`;
+  if (n < 10000)  return `${(n / 1000).toFixed(1)}s`;
+  if (n < 60000)  return `${Math.round(n / 1000)}s`;
+  const m = Math.floor(n / 60000);
+  const s = Math.round((n % 60000) / 1000);
+  return `${m}m ${s}s`;
+}
+
+/**
  * Render an array of step objects as a table:
  *   Step # | Step | Description (Expected / Actual) | Screenshot
  */
@@ -119,9 +133,11 @@ function renderStepsTable(steps, opts = {}) {
       : '<div class="empty-msg" style="padding:8px;">No screenshot</div>';
     const expected = s.expected || '';
     const actual   = s.actual   || s.description || '';
+    // Format duration as "1.2s" / "28s" / "1m 4s" for the pill under the step number.
+    const dur = Number.isFinite(s.durationMs) ? formatShortDuration(s.durationMs) : '';
     return `
       <tr class="steps-row steps-row-${(s.status || 'info').toLowerCase()}">
-        <td class="steps-num">${s.id}</td>
+        <td class="steps-num">${s.id}${dur ? `<div class="steps-duration" title="Step duration">${dur}</div>` : ''}</td>
         <td class="steps-name">
           <div class="steps-title">${escapeHtml(s.name || '')}</div>
           <div class="steps-status">${reportStatusBadge(s.status)}</div>
@@ -152,6 +168,28 @@ function renderStepsTable(steps, opts = {}) {
 const renderSetupStepsTable = (steps) =>
   renderStepsTable(steps, { emptyMsg: 'No setup steps recorded.' });
 
+// Derive short document-type + language chip labels from a plan card so the
+// header pills scan visually. Falls back to a neutral chip when we can't
+// infer either (e.g. non-marketplace suites).
+function planChipHtml(card) {
+  const name = String(card.name || '');
+  const url  = String(card.expectedUrl || card.pdfUrl || '');
+  const chips = [];
+
+  // Doc-type from the [LABEL] prefix the spec adds (e.g. "[SBC] Molina …").
+  const labelMatch = name.match(/^\[([^\]]+)\]/);
+  const label = labelMatch ? labelMatch[1].trim().toUpperCase() : '';
+  if (label === 'SBC')      chips.push(`<span class="plan-chip plan-chip-sbc" title="Summary of Benefits & Coverage">SBC</span>`);
+  else if (label === 'SOB') chips.push(`<span class="plan-chip plan-chip-sob" title="Summary of Benefits">SOB</span>`);
+  else if (label)           chips.push(`<span class="plan-chip plan-chip-generic">${escapeHtml(label)}</span>`);
+
+  // Language from the PDF path segment (/english/ vs /spanish/).
+  if (/\/english\//i.test(url))       chips.push(`<span class="plan-chip plan-chip-en" title="English PDF">EN</span>`);
+  else if (/\/spanish\//i.test(url))  chips.push(`<span class="plan-chip plan-chip-es" title="Spanish PDF">ES</span>`);
+
+  return chips.join('');
+}
+
 function renderPlanCard(card) {
   const stepsHtml = renderStepsTable(card.steps || [], { emptyMsg: 'No plan steps recorded.' });
 
@@ -170,6 +208,7 @@ function renderPlanCard(card) {
     <header class="plan-header">
       <div class="plan-header-main">
         <div class="plan-badge">Plan #${card.id}${card.isDataDriven ? ' · Data-driven' : ''}</div>
+        ${planChipHtml(card)}
         <h3 class="plan-name">${escapeHtml(card.name)}</h3>
       </div>
       <div class="plan-header-status">${reportStatusBadge(card.status)}</div>
@@ -339,6 +378,7 @@ function reportCss() {
     .steps-row-pass { background: var(--pass-bg); }
     .steps-row-fail { background: var(--fail-bg); }
     .steps-num { font-weight:800; color: var(--primary); font-size:1.05rem; text-align:center; }
+    .steps-duration { display:inline-block; margin-top:6px; padding:2px 8px; border-radius:10px; background: var(--bg); color: var(--muted); font-size:.68rem; font-weight:700; letter-spacing:.3px; white-space:nowrap; }
     .steps-name { min-width:180px; }
     .steps-title { font-weight:700; margin-bottom:6px; }
     .steps-status { }
@@ -367,7 +407,13 @@ function reportCss() {
     .plan-card.plan-pass { border-left:5px solid var(--pass); }
     .plan-card.plan-fail { border-left:5px solid var(--fail); }
     .plan-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
-    .plan-badge { display:inline-block; background: var(--info-bg); color: var(--info); padding:3px 10px; border-radius:10px; font-weight:700; font-size:.72rem; letter-spacing:.4px; margin-right:10px; }
+    .plan-badge { display:inline-block; background: var(--info-bg); color: var(--info); padding:3px 10px; border-radius:10px; font-weight:700; font-size:.72rem; letter-spacing:.4px; margin-right:8px; }
+    .plan-chip { display:inline-block; padding:3px 10px; border-radius:10px; font-weight:700; font-size:.72rem; letter-spacing:.4px; margin-right:6px; }
+    .plan-chip-sbc { background:#dbeafe; color:#1e40af; } html.dark .plan-chip-sbc { background:#1e3a8a; color:#93c5fd; }
+    .plan-chip-sob { background:#ccfbf1; color:#0f766e; } html.dark .plan-chip-sob { background:#134e4a; color:#5eead4; }
+    .plan-chip-en  { background:#fef3c7; color:#92400e; } html.dark .plan-chip-en  { background:#78350f; color:#fcd34d; }
+    .plan-chip-es  { background:#ede9fe; color:#5b21b6; } html.dark .plan-chip-es  { background:#4c1d95; color:#c4b5fd; }
+    .plan-chip-generic { background: var(--info-bg); color: var(--info); }
     .plan-name { margin:0; font-size:1.05rem; color: var(--primary); display:inline; }
     .plan-facts-list { list-style: disc outside; margin:12px 0; padding:12px 0 12px 22px; border-top:1px dashed var(--border); border-bottom:1px dashed var(--border); display:flex; flex-direction:column; gap:8px; }
     .plan-fact-item { line-height:1.5; }
@@ -570,6 +616,14 @@ function writeReport(ctx) {
     </div>`;
 
   const stepsHtml = renderSetupStepsTable(setupSteps);
+  // Dynamic "(min – max)" range for the Setup Steps section header, driven
+  // by the actual step ids present in the array — no more hard-coded "1 – 3".
+  const setupStepIds = setupSteps
+    .map(s => Number(s.id))
+    .filter(n => Number.isFinite(n));
+  const setupStepsRange = setupStepIds.length
+    ? ` (${Math.min(...setupStepIds)} – ${Math.max(...setupStepIds)})`
+    : '';
   const planCardsHtml = planCards.map(renderPlanCard).join('');
   const tocHtml = planCards.map(c => `<a href="#plan-${c.id}" class="toc-link toc-${c.status.toLowerCase()}">#${c.id} — ${escapeHtml(c.name)} ${reportStatusBadge(c.status)}</a>`).join('');
   const lightboxJson = JSON.stringify(lightboxImages);
@@ -615,7 +669,7 @@ function writeReport(ctx) {
     <div class="brand">Molina Automation · ${escapeHtml(testModule || 'Automation')}</div>
     <div class="tiny-kpis">
       <div class="tiny-kpi ${overall === 'PASS' ? 'ok' : 'bad'}">Overall ${overall}</div>
-      <div class="tiny-kpi ${failedPlans ? 'bad' : 'ok'}">${passedPlans}/${totalPlans} plans</div>
+      <div class="tiny-kpi ${failedPlans ? 'bad' : 'ok'}">${passedPlans}/${totalPlans} PDFs</div>
       <div class="tiny-kpi ${totalValidations === passedValidations && totalValidations > 0 ? 'ok' : 'bad'}">${passedValidations}/${totalValidations} validations</div>
       <div class="tiny-kpi">${escapeHtml(durationStr)}</div>
     </div>
@@ -630,21 +684,21 @@ function writeReport(ctx) {
     ${testDetailsHtml}
 
     <div class="kpi-grid">
-      ${kpi('Total plans', totalPlans, '', 'info')}
-      ${kpi('Passed plans', passedPlans, `${passRate}% pass-rate`, 'ok')}
-      ${kpi('Failed plans', failedPlans, '', failedPlans ? 'bad' : '')}
+      ${kpi('Total PDFs', totalPlans, 'validated in this run', 'info')}
+      ${kpi('Passed', passedPlans, `${passRate}% pass-rate`, 'ok')}
+      ${kpi('Failed', failedPlans, '', failedPlans ? 'bad' : '')}
       ${kpi('Validations', `${passedValidations} / ${totalValidations}`, 'passed / total', (totalValidations && totalValidations === passedValidations) ? 'ok' : 'bad')}
       ${kpi('Setup issues', setupFailures, '', setupFailures ? 'bad' : 'ok')}
     </div>
 
     <div class="section">
-      <h2 class="section-title">Setup Steps (1 – 3)</h2>
+      <h2 class="section-title">Setup Steps${setupStepsRange}</h2>
       ${stepsHtml}
     </div>
 
     ${totalPlans ? `
     <div class="section">
-      <h2 class="section-title">Plans</h2>
+      <h2 class="section-title">PDF Verification Details</h2>
       <nav class="toc">${tocHtml}</nav>
     </div>
     <div class="section">

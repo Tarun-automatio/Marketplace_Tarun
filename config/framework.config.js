@@ -135,7 +135,7 @@ const config = {
 
     // Data source paths. Excel is preferred; JSON is a fallback.
     data: {
-      excelPath: env('PLAN_MATERIALS_EXPECTED_EXCEL', path.join(process.cwd(), 'data', 'PlanMaterialsData.xlsx')),
+      excelPath: env('PLAN_MATERIALS_EXPECTED_EXCEL', path.join(process.cwd(), 'data', 'cy2027', 'PlanMaterialsData.xlsx')),
       jsonPath:  env('PLAN_MATERIALS_EXPECTED_FILE',  path.join(process.cwd(), 'data', 'planMaterialsExpectedPlans.json')),
       sheetName: env('PLAN_MATERIALS_EXPECTED_SHEET', 'Plans'),
     },
@@ -175,7 +175,7 @@ const config = {
       accordion: env('DRUG_ACCORDION', ''),
     },
     data: {
-      excelPath: env('DRUG_EXPECTED_EXCEL', path.join(process.cwd(), 'data', 'DrugPageData.xlsx')),
+      excelPath: env('DRUG_EXPECTED_EXCEL', path.join(process.cwd(), 'data', 'cy2027', 'DrugData.xlsx')),
       jsonPath:  env('DRUG_EXPECTED_FILE',  path.join(process.cwd(), 'data', 'drugExpectedPlans.json')),
       sheetName: env('DRUG_EXPECTED_SHEET', 'Plans'),
     },
@@ -207,7 +207,7 @@ const config = {
     // cases (one per state × year pair). If the sheet is missing, unreadable,
     // or has zero Run=Y rows, the suite runs zero tests — flip a row's Run
     // cell to 'Y' to include it.
-    excelPath:  env('MARKETPLACE_EXCEL',       path.join(process.cwd(), 'data', 'MarketplaceData.xlsx')),
+    excelPath:  env('MARKETPLACE_EXCEL',       path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceData.xlsx')),
     excelSheet: env('MARKETPLACE_EXCEL_SHEET', 'Marketplace'),
     // State to pick in the Forms & Documents dropdown (2-letter code, matches
     // the <option value> attribute — e.g. "tx", "ca", "az").
@@ -225,7 +225,43 @@ const config = {
       environment: env('MARKETPLACE_TEST_ENVIRONMENT', ''),  // '' → auto-detect from URL
     },
     report: {
-      dir: path.join(process.cwd(), env('MARKETPLACE_REPORT_DIR', 'reports/marketplace')),
+      dir: path.join(process.cwd(), env('MARKETPLACE_REPORT_DIR', 'reports/marketplace-toggleCheck')),
+    },
+  },
+
+  // ── Marketplace Plan Search suite ──────────────────────────────────────
+  // Extends the base marketplace flow (state → coverage-year toggle) with
+  // Audience/Category filters, plan-name search, and per-plan PDF URL
+  // validation. Each Excel row is one plan search that may open N PDFs
+  // (pipe-separated in the ExpectedUrls cell). Uses the same MarketplacePage
+  // (composition, not a new page class) plus new filter/search/card methods.
+  marketplacePlans: {
+    urls: {
+      appUrl: env('MARKETPLACE_PLANS_URL', 'https://pws-q3.molinahealthcare.com/'),
+    },
+    // Rows where `Run=Y` become individual tests (one per plan search).
+    // If sheet is missing, unreadable, or has zero Run=Y rows → 0 tests.
+    excelPath:  env('MARKETPLACE_PLANS_EXCEL',       path.join(process.cwd(), 'data', 'marketplace', 'MarketplacePlansData.xlsx')),
+    excelSheet: env('MARKETPLACE_PLANS_EXCEL_SHEET', 'Plans'),
+    // Optional companion sheet: additional plan-name searches to run AFTER
+    // the primary one (from the `Plans` sheet). Rows are joined to a test
+    // via the `TestId` column. If the sheet is missing or empty, each test
+    // runs only its primary search.
+    additionalSearchesSheet: env('MARKETPLACE_PLANS_ADDITIONAL_SHEET', 'AdditionalSearches'),
+    // Optional filters — narrow the matrix without editing the sheet.
+    filters: {
+      state: env('MARKETPLACE_PLANS_STATE', ''),
+      year:  env('MARKETPLACE_PLANS_YEAR',  ''),
+      plan:  env('MARKETPLACE_PLANS_PLAN',  ''),   // substring match on PlanName
+    },
+    test: {
+      id:          env('MARKETPLACE_PLANS_TEST_ID',     'MP-PLANS-001'),
+      module:      env('MARKETPLACE_PLANS_TEST_MODULE', 'Marketplace / Plan Search'),
+      author:      env('MARKETPLACE_PLANS_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('MARKETPLACE_PLANS_TEST_ENVIRONMENT', ''),
+    },
+    report: {
+      dir: path.join(process.cwd(), env('MARKETPLACE_PLANS_REPORT_DIR', 'reports/marketplace-plans')),
     },
   },
 };

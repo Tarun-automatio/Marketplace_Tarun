@@ -49,6 +49,16 @@ Run all commands from the framework root (`PlanMaterialAutomation/`).
 
 Each row in the Marketplace data sheet where `Run=Y` is auto-multiplied across three device profiles — **Desktop**, **iPhone SE**, and **iPad Pro** — so 1 sheet row = 3 test cases (Desktop + 2 responsive). English rows load the base URL; Spanish (`Language=es`) rows load `/es-us/…` and preserve the language through navigation.
 
+---
+
+## Run commands — Marketplace Plan Search
+
+Extends the marketplace flow with Audience/Category filters, plan-name search, and per-plan PDF URL validation. One Excel row = one plan search that verifies N pipe-separated expected PDF URLs.
+
+"npm run test:marketplace:plans" : Cleans old artifacts and runs the plan-search suite in headless mode
+
+"npm run test:marketplace:plans:headed" : Same run, but with a visible Chrome window
+
 
 ---
 
@@ -69,18 +79,45 @@ Each row in the Marketplace data sheet where `Run=Y` is auto-multiplied across t
 ## Data sheets
 
 Each suite is driven by an Excel workbook. Add rows and set `Run=Y` to enable them.
+Data files are grouped by project to mirror the `tests/` layout:
 
-- Plan Materials → `data/PlanMaterialsData.xlsx`  (sheet `Plans`)
-- Drug / Pharmacy → `data/DrugPageData.xlsx`  (sheet `Plans`)
-  - Columns: `Run, State, Year, Accordion, PlanName, ExpectedUrl`
-- Marketplace → `data/MarketplaceData.xlsx`  (sheet `Marketplace`)
-  - Columns: `Run, State, Language, DefaultYear, AlternateYear, AppUrl, TestId, Notes`
-  - `Language`: `en` or `es` (Spanish auto-prepends `/es-us` to the URL)
-  - `AppUrl`: leave blank to use the `MARKETPLACE_URL` env default
-  - `TestId`: shown in the report header and used as the HTML report filename
-  - Each `Run=Y` row expands to 3 test cases (Desktop + iPhone SE + iPad Pro)
+- **CY2027 project** (`data/cy2027/`)
+  - Plan Materials → `data/cy2027/PlanMaterialsData.xlsx`  (sheet `Plans`)
+  - Drug / Pharmacy → `data/cy2027/DrugData.xlsx`  (sheet `Plans`)
+    - Columns: `Run, TestId, State, Year, Accordion, PlanName, ExpectedUrl`
+- **Marketplace project** (`data/marketplace/`)
+  - Marketplace → `data/marketplace/MarketplaceData.xlsx`  (sheet `Marketplace`)
+    - Columns: `Run, State, Language, DefaultYear, AlternateYear, AppUrl, TestId, Notes`
+    - `Language`: `en` or `es` (Spanish auto-prepends `/es-us` to the URL)
+    - `AppUrl`: leave blank to use the `MARKETPLACE_URL` env default
+    - `TestId`: shown in the report header and used as the HTML report filename
+    - Each `Run=Y` row expands to 3 test cases (Desktop + iPhone SE + iPad Pro)
+  - Marketplace Plan Search → `data/marketplace/MarketplacePlansData.xlsx`
+    - **Sheet `Plans`** — primary search per test (one row = one test)
+      - Columns: `Run, TestId, State, Year, Label, Audience, Category, PlanName, ExpectedUrls`
+      - `Label`: short document-type name shown on plan cards (e.g. `SBC`)
+      - `Audience` / `Category`: filter checkbox values (e.g. `Member`, `Summary of Benefits`)
+      - `PlanName`: text typed into the search box (also used to filter matching cards)
+      - `ExpectedUrls`: pipe-separated PDF URLs — one per matching card
+    - **Sheet `AdditionalSearches`** — optional; extra searches to run AFTER the primary
+      - Columns: `TestId, Label, Audience, Category, ExpectedUrls`
+      - Each row joins to a `Plans` row via `TestId` (case-insensitive)
+      - Runs in row order; between searches the framework unchecks the previous Audience/Category filters and applies the new ones automatically
+      - Common use: primary search validates SBC PDFs, additional search validates SOB PDFs for the same plan
 
-Reports land under `reports/<suite>/<slug>/` with their own HTML file and a matching `.zip` bundle.
+Reports land under `reports/<suite>/<slug>/` as a self-contained HTML file with screenshots alongside.
+
+The `tests/` folder mirrors the same project split:
+
+```
+tests/
+  cy2027/
+    drugs/drugs.spec.js
+    planMaterials/planMaterials.spec.js
+  marketplace/
+    marketplace.spec.js
+    marketplacePlanSearch.spec.js
+```
 
 ---
 

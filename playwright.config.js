@@ -15,6 +15,7 @@ const frameworkConfig = require('./config/framework.config');
 
 module.exports = defineConfig({
   globalSetup: './hooks/globalSetup.js',
+  globalTeardown: './hooks/globalTeardown.js',
   testDir: './tests',
   // Keep every generated artifact under reports/ so the workspace root stays clean.
   outputDir: 'reports/test-results',

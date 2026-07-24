@@ -649,6 +649,321 @@ class MarketplacePage {
   currentUrl() {
     return this.page.url();
   }
+
+  // ─── Filter accordion (Audience / Category) ────────────────────────────
+  //
+  // The Forms & Documents page renders each filter as an accordion panel:
+  //   <button class="filterTitle" aria-expanded="…"
+  //           aria-controls="filter-panel-<Facet>Facet">Audience</button>
+  //   <ul id="filter-panel-<Facet>Facet">
+  //     <li><label>Member (165)<input type="checkbox" value="Member"
+  //                                    name="AudienceFacet"></label></li>
+  //     …
+  //
+  // We locate the toggle button by its visible text, expand if collapsed,
+  // then click the checkbox by its `value` attribute (exact) — the visible
+  // label text carries a count in parens (e.g. "Member (165)") which would
+  // change day-to-day and shouldn't be part of the selector.
+
+  filterToggleByName(name) {
+    return this.page
+      .locator('button.filterTitle')
+      .filter({ hasText: new RegExp('^\\s*' + String(name).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\s*$', 'i') })
+      .first();
+  }
+
+  /** Panel id resolver — 'Audience' → 'filter-panel-AudienceFacet'. */
+  filterPanelIdFor(name) {
+    const key = String(name).trim();
+    if (/audience/i.test(key)) return 'filter-panel-AudienceFacet';
+    if (/category/i.test(key)) return 'filter-panel-CategoryFacet';
+    return null;
+  }
+
+  /**
+   * Expand a filter accordion by name (idempotent — no-op when already open).
+   * Waits for aria-expanded="true" or the panel element to become visible.
+   */
+  async openFilterSection(name) {
+    const btn = this.filterToggleByName(name);
+    // The filter panel is populated asynchronously by the site after the
+    // Forms & Documents list resolves (which itself lags year/state changes
+    // by up to ~10s). Wait generously here so we don't fail on the first
+    // filter open of the run.
+    await btn.waitFor({ state: 'visible', timeout: 30000 });
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    const expanded = (await btn.getAttribute('aria-expanded').catch(() => '')) === 'true';
+    if (!expanded) {
+      await btn.click();
+      // Poll aria-expanded rather than rely on a fixed timeout — the panel
+      // uses a CSS class toggle that flips synchronously with the state.
+      const deadline = Date.now() + frameworkConfig.elementInteractionTimeoutMs;
+      while (Date.now() < deadline) {
+        const now = await btn.getAttribute('aria-expanded').catch(() => null);
+        if (now === 'true') break;
+        await this.page.waitForTimeout(80);
+      }
+      await waitForDomStable(this.page, {
+        stableMs: frameworkConfig.domStableMs,
+        timeoutMs: 2000,
+      });
+    }
+    logger.info(this.logTag, `Filter section "${name}" is open`);
+  }
+
+  /**
+   * Check a filter option's checkbox inside the named accordion. `optionValue`
+   * matches the `value` attribute exactly (not the visible label — which has
+   * "(N)" counts that change over time).
+   *
+   * Idempotent: no-op when the checkbox is already checked. Waits for the
+   * result list to settle after the filter fires its XHR.
+   */
+  async selectFilterOption(sectionName, optionValue) {
+    await this.openFilterSection(sectionName);
+    const panelId = this.filterPanelIdFor(sectionName);
+    const scope = panelId
+      ? this.page.locator(`ul[id="${panelId}"]`)
+      : this.page;
+
+    const value = String(optionValue).trim();
+    // Escape double-quotes in the CSS attribute selector.
+    const cssValue = value.replace(/"/g, '\\"');
+    const checkbox = scope.locator(`input[type="checkbox"][value="${cssValue}"]`).first();
+    await checkbox.waitFor({ state: 'attached', timeout: frameworkConfig.elementInteractionTimeoutMs });
+
+    const already = await checkbox.isChecked().catch(() => false);
+    if (already) {
+      logger.info(this.logTag, `Filter "${sectionName}=${value}" already selected`);
+      return;
+    }
+
+    // The native checkbox is visually hidden (styled via .checkmark span),
+    // so click the wrapping <label> — that toggles the underlying input
+    // reliably across desktop + mobile.
+    const label = scope.locator(`label:has(input[type="checkbox"][value="${cssValue}"])`).first();
+    if (await label.count()) {
+      await label.click();
+    } else {
+      await checkbox.check({ force: true });
+    }
+
+    // Filter selection triggers an XHR + full result re-render.
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await waitForDomStable(this.page, {
+      stableMs: frameworkConfig.domStableMs,
+      timeoutMs: frameworkConfig.domStableTimeoutMs,
+    });
+    logger.info(this.logTag, `Filter selected: ${sectionName}="${value}"`);
+  }
+
+  /**
+   * Uncheck a filter option's checkbox inside the named accordion (the
+   * opposite of `selectFilterOption`). Idempotent: no-op when already
+   * unchecked. Waits for the result list to settle after the filter fires
+   * its XHR.
+   */
+  async unselectFilterOption(sectionName, optionValue) {
+    await this.openFilterSection(sectionName);
+    const panelId = this.filterPanelIdFor(sectionName);
+    const scope = panelId
+      ? this.page.locator(`ul[id="${panelId}"]`)
+      : this.page;
+
+    const value = String(optionValue).trim();
+    const cssValue = value.replace(/"/g, '\\"');
+    const checkbox = scope.locator(`input[type="checkbox"][value="${cssValue}"]`).first();
+    await checkbox.waitFor({ state: 'attached', timeout: frameworkConfig.elementInteractionTimeoutMs });
+
+    const already = await checkbox.isChecked().catch(() => false);
+    if (!already) {
+      logger.info(this.logTag, `Filter "${sectionName}=${value}" already unselected`);
+      return;
+    }
+
+    const label = scope.locator(`label:has(input[type="checkbox"][value="${cssValue}"])`).first();
+    if (await label.count()) {
+      await label.click();
+    } else {
+      await checkbox.uncheck({ force: true });
+    }
+
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await waitForDomStable(this.page, {
+      stableMs: frameworkConfig.domStableMs,
+      timeoutMs: frameworkConfig.domStableTimeoutMs,
+    });
+    logger.info(this.logTag, `Filter unselected: ${sectionName}="${value}"`);
+  }
+
+  // ─── Search box ────────────────────────────────────────────────────────
+
+  searchInput() {
+    return this.page.locator('#searchInputBox, input[aria-label="Search" i]').first();
+  }
+
+  searchButton() {
+    // The button carries just an SVG icon + "Search" label; scope by parent
+    // form so we don't accidentally target header search components.
+    return this.page.locator(
+      'form.searchbox-section button.search_btn, '
+      + 'form.searchbox-section button[type="button"]:has(span:has-text("Search"))'
+    ).first();
+  }
+
+  /**
+   * Type `planName` into the search box and click the Search button.
+   * Waits for the URL to reflect `queue=<text>` (Molina drives search via
+   * URL query param) AND for a `.resultCard` (or a "no results" message)
+   * to appear before returning — protects downstream calls that query the
+   * result list.
+   */
+  async searchByPlanName(planName) {
+    const text = String(planName || '').trim();
+    const input = this.searchInput();
+    await input.waitFor({ state: 'visible', timeout: frameworkConfig.elementInteractionTimeoutMs });
+    await input.scrollIntoViewIfNeeded().catch(() => {});
+    await input.fill('');
+    if (text) await input.fill(text);
+
+    await this.searchButton().click();
+
+    // Molina drives search via URL query param `queue=` — wait for it to
+    // appear (client-side history.push) before probing the DOM.
+    if (text) {
+      await this.page.waitForURL(/[?&]queue=/i, { timeout: 15000 }).catch(() => {});
+    }
+    // Wait for either a rendered result card OR a "no results" message so
+    // we don't query DOM mid-refresh.
+    await Promise.race([
+      this.page.locator('.resultCard').first()
+        .waitFor({ state: 'attached', timeout: 20000 }).catch(() => null),
+      this.page.locator('text=/no\\s+results?/i').first()
+        .waitFor({ state: 'attached', timeout: 20000 }).catch(() => null),
+    ]);
+    await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    await waitForDomStable(this.page, {
+      stableMs: frameworkConfig.domStableMs,
+      timeoutMs: frameworkConfig.domStableTimeoutMs,
+    });
+    logger.info(this.logTag, `Searched for plan: "${text}"`);
+  }
+
+  // ─── Result cards ──────────────────────────────────────────────────────
+
+  /**
+   * Collect every `.resultCard` currently rendered — each result's title,
+   * PDF href (relative), and clickable link locator.
+   *
+   * @returns {Promise<Array<{
+   *   index:   number,       // 0-based position in the DOM
+   *   title:   string,       // visible card heading
+   *   href:    string,       // href attribute (may be relative)
+   *   linkLoc: import('@playwright/test').Locator,
+   * }>>}
+   */
+  async collectResultCards() {
+    const cards = this.page.locator('.resultCard');
+    const count = await cards.count();
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const card = cards.nth(i);
+      const linkLoc  = card.locator('a.title-link').first();
+      const titleLoc = linkLoc.locator('.card-heading').first();
+      const title = ((await titleLoc.textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+      const href  = ((await linkLoc.getAttribute('href').catch(() => '')) || '').trim();
+      if (!title && !href) continue;
+      out.push({ index: i, title, href, linkLoc });
+    }
+    return out;
+  }
+
+  /**
+   * Same as `collectResultCards` but filtered to cards whose visible title
+   * matches `needle` with a **word-boundary substring** match (case + whitespace
+   * insensitive). This prevents "Molina Gold Core 1500" from also matching
+   * "Molina Gold Core 1500 LCS" — the needle must appear as a full word/phrase,
+   * not as a prefix of a longer name.
+   *
+   * When multiple cards match (e.g. one English SBC and one Spanish SBC for
+   * the same plan), ALL are returned in DOM order — the caller decides which
+   * one to click first.
+   */
+  async findResultCardsByName(needle) {
+    const raw = String(needle || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return this.collectResultCards();
+    // Escape regex metacharacters in the needle so plan names with e.g.
+    // parentheses or plus signs work as literal text, then require a word
+    // boundary (start-of-string / whitespace / punctuation) on both sides.
+    const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    const wordBoundaryRe = new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, 'i');
+    const all = await this.collectResultCards();
+    // Prefer word-boundary matches; if none found, fall back to a loose
+    // substring match so testers get *some* signal instead of an empty list.
+    const strict = all.filter(c => wordBoundaryRe.test(c.title));
+    if (strict.length) return strict;
+    const loose = all.filter(c => c.title.toLowerCase().includes(raw.toLowerCase()));
+    return loose;
+  }
+
+  /**
+   * Find the SINGLE result card whose title matches `needleName` exactly
+   * (whitespace + case insensitive) AND whose href pathname matches the
+   * pathname of `expectedUrl`.
+   *
+   * Rationale: when several plans share a similar prefix (e.g. "Molina Gold
+   * Core 1500" and "Molina Gold Core 1500 LCS Plus with Adult Vision"),
+   * and the SAME title text may appear TWICE — once for the English PDF and
+   * once for the Spanish PDF — the ONLY way to pick the right card is to
+   * match by (a) exact title and (b) the PDF href language/path. This is
+   * order-independent and doesn't rely on positional guessing.
+   *
+   * @returns {Promise<{ index, title, href, linkLoc } | null>}
+   */
+  async findCardByNameAndUrl(needleName, expectedUrl) {
+    const nameKey = String(needleName || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const expectedPath = expectedUrlToPath(expectedUrl);
+    if (!nameKey || !expectedPath) return null;
+    const all = await this.collectResultCards();
+
+    const nameMatches = all.filter(c =>
+      c.title.replace(/\s+/g, ' ').trim().toLowerCase() === nameKey
+    );
+    if (nameMatches.length === 0) return null;
+
+    const urlMatches = nameMatches.filter(c => hrefToPath(c.href) === expectedPath);
+    if (urlMatches.length === 1) return urlMatches[0];
+    if (urlMatches.length > 1) {
+      logger.warn(this.logTag, `Multiple cards match name="${needleName}" AND href-path "${expectedPath}" — returning first`);
+      return urlMatches[0];
+    }
+    return null;
+  }
+}
+
+// ─── Module-scoped URL helpers used by findCardByNameAndUrl ─────────────────
+// Kept outside the class so they can be called without a MarketplacePage
+// instance (they're pure functions).
+
+function hrefToPath(href) {
+  const s = String(href || '').trim();
+  if (!s) return '';
+  // Absolute URL — parse and take pathname.
+  if (/^https?:\/\//i.test(s)) {
+    try { return new URL(s).pathname.replace(/\/+$/, '').toLowerCase(); }
+    catch { /* fall through */ }
+  }
+  // Relative path — strip query/fragment + trailing slash, lowercase.
+  return s.replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+}
+
+function expectedUrlToPath(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  try { return new URL(s).pathname.replace(/\/+$/, '').toLowerCase(); }
+  catch {
+    return s.replace(/^https?:\/\/[^/]+/, '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+  }
 }
 
 module.exports = { MarketplacePage };
