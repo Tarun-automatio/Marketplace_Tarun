@@ -6,6 +6,8 @@
  *       — inspect PNG files without any external dependency
  *   • captureElementScreenshot   — element-level (optionally padded)
  *   • captureClippedScreenshot   — union bounding-box clip of multiple elements
+ *   • highlightLocator           — apply a temporary CSS highlight to an
+ *                                  element and return an async cleanup
  *   • highlightAndCapture        — apply temporary CSS highlight to a target,
  *                                  screenshot the enclosing container, always restore
  *   • captureEvidencePanel       — render an in-memory HTML panel in a fresh
@@ -113,6 +115,98 @@ async function captureElementScreenshot(locator, filePath, options = {}) {
   }
   await locator.screenshot({ path: filePath, animations });
   return filePath;
+}
+
+/**
+ * Apply a temporary visual highlight (bright yellow background + amber
+ * outline + soft glow) to the given locator so it stands out in the
+ * screenshot the caller is about to take. Returns an async cleanup
+ * function that restores the element's original inline `style` — call it
+ * from a `finally` block so a screenshot failure never leaves the DOM
+ * decorated.
+ *
+ * Kept separate from `highlightAndCapture` because most callers want to
+ * decide themselves whether the screenshot is element-level, viewport, or
+ * full-page (and whether it should be routed through the framework's
+ * `saveScreenshot` or a raw `page.screenshot`).
+ *
+ * @example
+ *   const clearHighlight = await highlightLocator(ctaLocator);
+ *   try {
+ *     await page.screenshot({ path: 'Step2.png' });
+ *   } finally {
+ *     await clearHighlight();
+ *   }
+ *
+ * @param {import('@playwright/test').Locator} locator   — element to highlight
+ * @param {object} [options]
+ * @param {string} [options.style]      — CSS applied inline. Defaults to a
+ *   bright yellow highlight suitable for evidence screenshots.
+ * @param {boolean} [options.scrollIntoView=true] — scroll target into view
+ *   before applying the highlight so it's actually visible in the shot.
+ * @param {number} [options.settleMs=150] — paint-settle pause after applying
+ *   the highlight (browser reflow can lag a frame or two).
+ * @returns {Promise<() => Promise<void>>} async cleanup function. Idempotent
+ *   and safe to call multiple times.
+ */
+async function highlightLocator(locator, options = {}) {
+  const {
+    style = 'outline: 3px solid #f9a825 !important; outline-offset: 2px;'
+          + ' background-color: #fff59d !important;'
+          + ' box-shadow: 0 0 0 4px rgba(249,168,37,0.35) !important;'
+          + ' border-radius: 4px !important;'
+          + ' transition: none !important;',
+    scrollIntoView = true,
+    settleMs = 150,
+  } = options;
+
+  const handle = await locator.elementHandle();
+  if (!handle) {
+    // Nothing to highlight — return a no-op cleanup so callers don't
+    // have to null-check.
+    return async () => {};
+  }
+
+  if (scrollIntoView) {
+    await handle.scrollIntoViewIfNeeded().catch(() => {});
+  }
+
+  try {
+    await handle.evaluate((el, css) => {
+      // Save the pre-existing inline style verbatim so we can restore it
+      // exactly (including "" for elements that had no style attribute).
+      const had  = el.hasAttribute('style');
+      const prev = el.getAttribute('style') || '';
+      el.setAttribute('data-pw-hl-had', had ? '1' : '0');
+      el.setAttribute('data-pw-hl-prev', prev);
+      el.setAttribute('style', prev ? `${prev};${css}` : css);
+    }, style);
+  } catch {
+    // If the element vanished mid-decoration, skip cleanup entirely.
+    await handle.dispose().catch(() => {});
+    return async () => {};
+  }
+
+  if (settleMs > 0) {
+    await locator.page().waitForTimeout(settleMs);
+  }
+
+  let cleared = false;
+  return async function clearHighlight() {
+    if (cleared) return;
+    cleared = true;
+    try {
+      await handle.evaluate((el) => {
+        const had  = el.getAttribute('data-pw-hl-had') === '1';
+        const prev = el.getAttribute('data-pw-hl-prev') || '';
+        if (had && prev) el.setAttribute('style', prev);
+        else             el.removeAttribute('style');
+        el.removeAttribute('data-pw-hl-had');
+        el.removeAttribute('data-pw-hl-prev');
+      });
+    } catch { /* ignore — DOM may have changed */ }
+    finally { await handle.dispose().catch(() => {}); }
+  };
 }
 
 /**
@@ -412,6 +506,7 @@ module.exports = {
   isProbablyBlank,
   validateScreenshotImage,
   captureElementScreenshot,
+  highlightLocator,
   highlightAndCapture,
   captureEvidencePanel,
   ensureValidScreenshot,

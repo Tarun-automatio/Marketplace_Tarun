@@ -149,7 +149,7 @@ function loadTestMatrix() {
     return true;
   };
 
-  /** Turn a flat array of scopes into a stable-sorted result. */
+  /** Turn a flat array of scopes into a stable-sorted, TestId-annotated result. */
   const finalize = (scopes) =>
     scopes
       .filter(s => passesFilters(s.state, s.year, s.accordion))
@@ -157,7 +157,18 @@ function loadTestMatrix() {
       .sort((a, b) =>
         a.state.localeCompare(b.state)
         || a.year.localeCompare(b.year)
-        || a.accordion.localeCompare(b.accordion));
+        || a.accordion.localeCompare(b.accordion))
+      // Ensure every scope has a TestId. Prefer the one supplied via the
+      // Excel `TestId` column (populated during grouping above). When the
+      // sheet leaves it blank, auto-generate a sequential ID that mirrors
+      // the DrugPharmacy format:
+      //   "TC001 TX Plan Materials — Annual Notice of Change (ANOC)"
+      // Numbering runs after the sort so it's deterministic across runs.
+      .map((s, i) => ({
+        ...s,
+        testId: s.testId
+          || `TC${String(i + 1).padStart(3, '0')} ${s.state.toUpperCase()} Plan Materials \u2014 ${s.accordion}`,
+      }));
 
   // ── 1. Excel ──
   try {
@@ -180,6 +191,10 @@ function loadTestMatrix() {
             groups.set(key, { state, year, accordion, plans: [], source: 'excel' });
           }
           const scope = groups.get(key);
+          // First non-empty TestId in the group wins — testers may leave
+          // it blank on some rows and only tag the first row per scope.
+          const rowTestId = norm(r.TestId);
+          if (rowTestId && !scope.testId) scope.testId = rowTestId;
           const name = norm(r.PlanName);
           const url  = norm(r.ExpectedUrl);
           if (name) scope.plans.push({ name, url });
@@ -372,7 +387,13 @@ if (TEST_MATRIX.length === 0) {
  */
 function registerTestsForScope(scope) {
   const scopeLabel   = `${scope.state} · ${scope.year} · ${scope.accordion}`;
-  const scopeSlug    = slugifyScope(scope.state, scope.year, scope.accordion);
+  // Prefix scope folder + report file with the scope's TestId (TC###)
+  // so filenames sort in test-order and cross-reference the report
+  // header — mirrors the DrugPharmacy naming (`TC001_NV_Find_a_pharmacy`).
+  const tcPrefix     = (scope.testId || '').match(/^TC\d+/i);
+  const scopeSlug    = tcPrefix
+    ? `${tcPrefix[0].toUpperCase()}_${slugifyScope(scope.state, scope.year, scope.accordion)}`
+    : slugifyScope(scope.state, scope.year, scope.accordion);
   const scopeDir     = path.join(REPORT_DIR, scopeSlug);
   const screenshotsDir = path.join(scopeDir, 'screenshots');
   const reportFile     = path.join(scopeDir, 'PlanMaterials_Report.html');
@@ -414,7 +435,7 @@ function registerTestsForScope(scope) {
           reportFile,
           testMeta: {
             name: testName,
-            id: TEST_ID,
+            id: scope.testId || TEST_ID,
             module: TEST_MODULE,
             description: testDescription,
             author: TEST_AUTHOR,

@@ -315,7 +315,7 @@ function reportCss() {
     }
     * { box-sizing: border-box; }
     body { margin:0; background: var(--bg); color: var(--text); font-family:'Segoe UI',system-ui,-apple-system,sans-serif; line-height:1.5; }
-    .wrap { max-width:1440px; margin:0 auto; padding:20px 20px 60px; }
+    .wrap { max-width:1600px; margin:0 auto; padding:20px 20px 60px; }
 
     /* Sticky summary */
     .sticky-summary {
@@ -379,7 +379,7 @@ function reportCss() {
     .steps-row-fail { background: var(--fail-bg); }
     .steps-num { font-weight:800; color: var(--primary); font-size:1.05rem; text-align:center; }
     .steps-duration { display:inline-block; margin-top:6px; padding:2px 8px; border-radius:10px; background: var(--bg); color: var(--muted); font-size:.68rem; font-weight:700; letter-spacing:.3px; white-space:nowrap; }
-    .steps-name { min-width:180px; }
+    .steps-name { min-width:240px; }
     .steps-title { font-weight:700; margin-bottom:6px; }
     .steps-status { }
     .steps-desc { color: var(--text); }
@@ -602,11 +602,30 @@ function writeReport(ctx) {
   const passedValidations = planCards.reduce((s, p) => s + p.validations.filter(v => v.status === 'PASS').length, 0);
   const setupFailures = setupSteps.filter(s => s.status === 'FAIL').length;
 
+  // Setup-step tally — used for the KPI grid on tests that don't produce
+  // plan cards (e.g. Marketplace Pharmacy CTA verification). Those tests
+  // pass `planCards: []` and rely entirely on setup steps for evidence.
+  const totalSteps  = setupSteps.length;
+  const passedSteps = setupSteps.filter(s => s.status === 'PASS').length;
+  const failedSteps = totalSteps - passedSteps;
+  const stepPassRate = totalSteps ? Math.round((passedSteps / totalSteps) * 100) : 0;
+
+  // "Setup-only" mode = report has setup steps but no plan cards. Common
+  // for CTA/link-verification style suites.
+  const isSetupOnly = totalPlans === 0 && totalSteps > 0;
+
   const durationStr = durationMs >= 60000
     ? `${Math.floor(durationMs / 60000)}m ${Math.round((durationMs % 60000) / 1000)}s`
     : `${Math.round(durationMs / 1000)}s`;
 
-  const overall = (setupFailures === 0 && failedPlans === 0 && totalPlans > 0) ? 'PASS' : 'FAIL';
+  // Overall status:
+  //  • Setup-only mode → PASS iff every setup step passed.
+  //  • Plan-driven mode → PASS iff no setup failures AND every plan passed
+  //    (kept as before so existing plan-materials/plan-search reports
+  //    behave identically).
+  const overall = isSetupOnly
+    ? (setupFailures === 0 ? 'PASS' : 'FAIL')
+    : ((setupFailures === 0 && failedPlans === 0 && totalPlans > 0) ? 'PASS' : 'FAIL');
 
   const kpi = (label, value, sub, cls) => `
     <div class="kpi ${cls || ''}">
@@ -669,8 +688,10 @@ function writeReport(ctx) {
     <div class="brand">Molina Automation · ${escapeHtml(testModule || 'Automation')}</div>
     <div class="tiny-kpis">
       <div class="tiny-kpi ${overall === 'PASS' ? 'ok' : 'bad'}">Overall ${overall}</div>
-      <div class="tiny-kpi ${failedPlans ? 'bad' : 'ok'}">${passedPlans}/${totalPlans} PDFs</div>
-      <div class="tiny-kpi ${totalValidations === passedValidations && totalValidations > 0 ? 'ok' : 'bad'}">${passedValidations}/${totalValidations} validations</div>
+      ${isSetupOnly
+        ? `<div class="tiny-kpi ${failedSteps ? 'bad' : 'ok'}">${passedSteps}/${totalSteps} steps</div>`
+        : `<div class="tiny-kpi ${failedPlans ? 'bad' : 'ok'}">${passedPlans}/${totalPlans} PDFs</div>
+           <div class="tiny-kpi ${totalValidations === passedValidations && totalValidations > 0 ? 'ok' : 'bad'}">${passedValidations}/${totalValidations} validations</div>`}
       <div class="tiny-kpi">${escapeHtml(durationStr)}</div>
     </div>
     <div class="status">${reportStatusBadge(overall)}</div>
@@ -684,15 +705,22 @@ function writeReport(ctx) {
     ${testDetailsHtml}
 
     <div class="kpi-grid">
-      ${kpi('Total PDFs', totalPlans, 'validated in this run', 'info')}
-      ${kpi('Passed', passedPlans, `${passRate}% pass-rate`, 'ok')}
-      ${kpi('Failed', failedPlans, '', failedPlans ? 'bad' : '')}
-      ${kpi('Validations', `${passedValidations} / ${totalValidations}`, 'passed / total', (totalValidations && totalValidations === passedValidations) ? 'ok' : 'bad')}
-      ${kpi('Setup issues', setupFailures, '', setupFailures ? 'bad' : 'ok')}
+      ${isSetupOnly ? `
+        ${kpi('Total steps', totalSteps, 'in this run', 'info')}
+        ${kpi('Passed', passedSteps, `${stepPassRate}% pass-rate`, 'ok')}
+        ${kpi('Failed', failedSteps, '', failedSteps ? 'bad' : '')}
+        ${kpi('Duration', durationStr, '', '')}
+      ` : `
+        ${kpi('Total PDFs', totalPlans, 'validated in this run', 'info')}
+        ${kpi('Passed', passedPlans, `${passRate}% pass-rate`, 'ok')}
+        ${kpi('Failed', failedPlans, '', failedPlans ? 'bad' : '')}
+        ${kpi('Validations', `${passedValidations} / ${totalValidations}`, 'passed / total', (totalValidations && totalValidations === passedValidations) ? 'ok' : 'bad')}
+        ${kpi('Setup issues', setupFailures, '', setupFailures ? 'bad' : 'ok')}
+      `}
     </div>
 
     <div class="section">
-      <h2 class="section-title">Setup Steps${setupStepsRange}</h2>
+      <h2 class="section-title">${isSetupOnly ? 'Test Steps' : 'Setup Steps'}${setupStepsRange}</h2>
       ${stepsHtml}
     </div>
 

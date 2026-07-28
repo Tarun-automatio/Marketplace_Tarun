@@ -264,6 +264,48 @@ const config = {
       dir: path.join(process.cwd(), env('MARKETPLACE_PLANS_REPORT_DIR', 'reports/marketplace-plans')),
     },
   },
+
+  // ── Marketplace Pharmacy / external-CTA suite ──────────────────────────
+  // Individual & Family Drug page (`/ifp/{state}/drugs`) has several
+  // external-link CTAs ("Find a pharmacy", "Find a provider", mail-order
+  // form, etc.). Each CTA triggers Molina's ExternalSiteModal popup with
+  // Continue / Stay / Close buttons. This suite verifies each CTA opens
+  // the correct external URL in a new tab.
+  //
+  // Data-driven: one row per (State, LinkLabel) in
+  // `data/marketplace/MarketplaceData.xlsx` sheet `DrugPharmacy`.
+  marketplacePharmacy: {
+    // URL template — `{state}` is substituted per test row.
+    urls: {
+      template: env('MARKETPLACE_PHARMACY_URL_TEMPLATE',
+                    'https://pws-q3.molinahealthcare.com/ifp/{state}/drugs'),
+    },
+    // Uses the SAME MarketplaceData.xlsx workbook as the toggle-check suite
+    // but a DIFFERENT sheet, so testers manage all Marketplace data in one
+    // file. Sheet columns:
+    //   Run | TestId | State | LinkLabel | ExpectedInitialUrl | ExpectedFinalUrl | Notes
+    excelPath:  env('MARKETPLACE_PHARMACY_EXCEL',
+                    path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceData.xlsx')),
+    excelSheet: env('MARKETPLACE_PHARMACY_EXCEL_SHEET', 'DrugPharmacy'),
+    // Optional filters — narrow the matrix without editing the sheet.
+    filters: {
+      state:     env('MARKETPLACE_PHARMACY_STATE',      ''),
+      linkLabel: env('MARKETPLACE_PHARMACY_LINK_LABEL', ''),  // substring match
+    },
+    // How long to wait for the new tab's redirect chain to settle before
+    // reading its final URL. The Continue link's href points at a Caremark
+    // entry URL that typically 302-redirects two or three times.
+    newTabRedirectWaitMs: env('MARKETPLACE_PHARMACY_REDIRECT_WAIT_MS', 15000),
+    test: {
+      id:          env('MARKETPLACE_PHARMACY_TEST_ID',     'MP-PHARMACY-001'),
+      module:      env('MARKETPLACE_PHARMACY_TEST_MODULE', 'Marketplace / Drug Pharmacy Links'),
+      author:      env('MARKETPLACE_PHARMACY_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('MARKETPLACE_PHARMACY_TEST_ENVIRONMENT', ''),
+    },
+    report: {
+      dir: path.join(process.cwd(), env('MARKETPLACE_PHARMACY_REPORT_DIR', 'reports/marketplace-pharmacy')),
+    },
+  },
 };
 
 module.exports = config;

@@ -28,6 +28,7 @@ const path = require('path');
 const { generateMarketplaceSummaries } = require('./marketplaceSummary');
 const { generatePlansDashboard }       = require('./marketplacePlansSummary');
 const { generateDrugDashboard }        = require('./drugSummary');
+const { generatePharmacyDashboard }    = require('./marketplacePharmacySummary');
 
 module.exports = async function globalTeardown() {
   // ── Marketplace toggle-check consolidated report (per state) ──────────
@@ -69,4 +70,16 @@ module.exports = async function globalTeardown() {
   } catch (err) {
     console.error(`[TEARDOWN] Drug / Pharmacy dashboard failed: ${err && err.message}`);
   }
-};
+  // ── Marketplace Drug Pharmacy dashboard (single file, all states) ────
+  const pharmacyDir = path.join(process.cwd(), 'reports', 'marketplace-pharmacy');
+  try {
+    const { file, count } = generatePharmacyDashboard({ rootDir: pharmacyDir });
+    if (count > 0) {
+      console.log(`[TEARDOWN] Marketplace Drug Pharmacy dashboard written (${count} scope${count === 1 ? '' : 's'}):`);
+      console.log(`  • ${file}`);
+    } else {
+      console.log('[TEARDOWN] No marketplace-pharmacy variant.json files found — dashboard skipped.');
+    }
+  } catch (err) {
+    console.error(`[TEARDOWN] Marketplace Drug Pharmacy dashboard failed: ${err && err.message}`);
+  }};

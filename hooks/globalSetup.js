@@ -26,8 +26,9 @@ const path = require('path');
 const SUITE_REPORTS = [
   { match: /tests[\\/]cy2027[\\/]planMaterials/i, dir: 'reports/plan-materials' },
   { match: /tests[\\/]cy2027[\\/]drugs/i,         dir: 'reports/drug' },
-  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i, dir: 'reports/marketplace-plans' },
-  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i, dir: 'reports/marketplace-toggleCheck' },
+  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i,    dir: 'reports/marketplace-plans' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,   dir: 'reports/marketplace-pharmacy' },
+  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,               dir: 'reports/marketplace-toggleCheck' },
 ];
 
 // Always cleaned — Playwright's own artifact folders.
