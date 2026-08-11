@@ -1,22 +1,31 @@
 /**
- * Marketplace — Plan Search + Per-Plan PDF Validation (Requirement 2)
+ * Marketplace — Plan Search + Per-Plan PDF Validation (batched)
  *
- * Business flow (per Excel row):
- *   Step 1  Launch Marketplace URL (cookie banner dismissed implicitly)
- *   Step 2  Open "Member Resources" navigation
- *   Step 3  Open "Forms & Documents" page
- *   Step 4  Select state → capture default coverage year (2026)
- *           → assert URL contains `year=2026`
- *   Step 5  Click Coverage Year 2027 → assert URL contains `year=2027`
- *   Step 6  Apply filters: Audience + Category (both from the data sheet
- *           so testers can vary them without touching code)
- *   Step 7  Type PlanName in the search box → click Search
- *   Step 8+ For each cell in `ExpectedUrls` (pipe-separated), match the
- *           result card whose title equals PlanName AND whose href
- *           pathname matches the expected URL pathname, click it, wait
- *           for the new tab, capture its URL, and validate against
- *           ExpectedUrls[i]. Each expected URL produces ONE plan
- *           card in the HTML report.
+ * Excel rows are grouped by (State, Year, AppUrl) so the "launch →
+ * Member Resources → Forms & Documents → state → year" nav runs ONCE per
+ * batch. Each plan inside the batch then executes its own filter/search/
+ * validate cycle in English + Spanish, and writes its OWN per-plan HTML
+ * report + variant.json — downstream artifacts (per-plan reports,
+ * consolidated dashboard) look identical to a per-plan run.
+ *
+ * Between plans in the same batch the framework switches UI language
+ * back to English (idempotent) and navigates to a clean Forms & Documents
+ * URL (state+year only) so Molina drops the previous plan's search +
+ * filter query params. Failures in one plan do not stop subsequent plans.
+ *
+ * Business flow per plan (steps captured in the per-plan report):
+ *   Step 1  Launch Marketplace URL                          (shared)
+ *   Step 2  Open "Member Resources" navigation              (shared)
+ *   Step 3  Open "Forms & Documents" page                   (shared)
+ *   Step 4  Select state → capture default coverage year    (shared)
+ *   Step 5  Click Coverage Year <year>                      (shared)
+ *   Step 6  English pass — Apply filters (Audience+Category)
+ *   Step 7  English pass — Type PlanName, click Search
+ *   Step 8+ English pass — Additional searches (e.g. SOB)
+ *   Step N  Switch site language to Spanish
+ *   Step N+ Spanish pass — same filter+search cycle as English
+ *   Per-URL plan cards then click each expected PDF link, capture the
+ *   new-tab URL, and validate against ExpectedUrls[i].
  *
  * Data model (data/MarketplacePlansData.xlsx, sheet `Plans`):
  *   Run           — 'Y' to include, anything else to skip
@@ -280,6 +289,76 @@ function loadTestMatrix() {
 
 const TEST_MATRIX = loadTestMatrix();
 
+// ══════════════════════════════════════════════════════════════════════════
+// Batch grouping — bundle Excel rows into (State, Year, AppUrl) batches so
+// the "launch → Member Resources → Forms & Documents → state → year" nav
+// runs ONCE per batch instead of once per plan. Between plans in a batch,
+// the framework switches UI language back to English (idempotent) and
+// navigates to a clean Forms & Documents URL (state+year only) so Molina
+// drops the previous plan's search + filter query params.
+// ══════════════════════════════════════════════════════════════════════════
+
+function groupScopesByStateYear(scopes) {
+  const map = new Map();
+  for (const s of scopes) {
+    const key = `${s.state}|${s.year}|${s.appUrl}`;
+    if (!map.has(key)) {
+      map.set(key, { key, state: s.state, year: s.year, appUrl: s.appUrl, plans: [] });
+    }
+    map.get(key).plans.push(s);
+  }
+  return Array.from(map.values());
+}
+
+// Empirical budgets used to size the Playwright per-test timeout so a
+// batch of 50+ plans doesn't hit the default cap. The batch finishes as
+// soon as its work is done regardless of the ceiling.
+const SHARED_SETUP_BUDGET_MS = 120_000;
+const PER_PLAN_BUDGET_MS     = 180_000;
+const BATCH_SLACK_MS         = 90_000;
+
+function timeoutForGroup(group) {
+  return SHARED_SETUP_BUDGET_MS + (group.plans.length * PER_PLAN_BUDGET_MS) + BATCH_SLACK_MS;
+}
+
+/** Clean Forms & Documents URL used to reset filters between plans in a batch. */
+function cleanFormsAndDocsUrl(appUrl, state, year) {
+  const origin = new URL(appUrl).origin;
+  const s = String(state || '').toLowerCase();
+  const y = String(year  || '');
+  return `${origin}/member-resources/forms-documents?state=${s}&year=${y}`;
+}
+
+/**
+ * Reset the page between plans inside a batch: switch UI language back to
+ * English (idempotent), then goto the clean Forms & Documents URL so any
+ * prior search + filter query params are dropped. Best-effort — failures
+ * are logged; the next plan's Step 6 (filter apply) will surface a broken
+ * state naturally.
+ */
+async function resetBetweenPlans({ marketplace, page, appUrl, state, year }) {
+  try {
+    await marketplace.switchLanguage('en');
+  } catch (err) {
+    logger.warn('BATCH',
+      `switchLanguage('en') failed during reset: `
+      + `${(err && err.message ? err.message : String(err)).substring(0, 160)}`);
+  }
+  try {
+    const cleanUrl = cleanFormsAndDocsUrl(appUrl, state, year);
+    await page.goto(cleanUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: frameworkConfig.navigationTimeoutMs,
+    });
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await marketplace.scrollToAllFormsAndDocuments();
+  } catch (err) {
+    logger.warn('BATCH',
+      `Reset navigation failed: `
+      + `${(err && err.message ? err.message : String(err)).substring(0, 160)}`);
+  }
+}
+
 if (TEST_MATRIX.length === 0) {
   base.describe('Marketplace Plan Search — matrix', () => {
     base('No plan-search scopes matched the current filters', () => {
@@ -292,143 +371,66 @@ if (TEST_MATRIX.length === 0) {
     });
   });
 } else {
-  for (const scope of TEST_MATRIX) registerScope(scope);
+  const GROUPS = groupScopesByStateYear(TEST_MATRIX);
+  const totalPlans = GROUPS.reduce((n, g) => n + g.plans.length, 0);
+  logger.info('MP-PLANS',
+    `Registering ${GROUPS.length} batch(es) covering ${totalPlans} plan(s): `
+    + GROUPS.map(g => `${g.state}·${g.year} (${g.plans.length})`).join(', '));
+  for (const group of GROUPS) registerGroup(group);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// One describe + one test per Excel row. Each ExpectedUrl becomes its own
-// "plan card" in the HTML report so per-URL PASS/FAIL is clearly visible.
+// registerGroup — one describe/test per (State, Year, AppUrl) batch.
+// Shared Steps 1..5 run once; each plan in the batch executes its own
+// filter/search/validate cycle (EN + ES) and writes its OWN per-plan HTML
+// report + variant.json so downstream artifacts (per-plan reports,
+// consolidated dashboard) look identical to a per-plan run. Failures in
+// one plan do not stop subsequent plans; the batch throws once at the
+// end if any plan failed.
 // ─────────────────────────────────────────────────────────────────────────
 
-function registerScope(scope) {
-  const testIdSlug   = scope.testId ? sanitizeForFs(scope.testId) : `Row${scope.row}`;
-  const shortCode    = scope.testId ? scope.testId.split(/\s+/)[0] : `Row${scope.row}`;
-  const scopeDir     = path.join(REPORT_DIR, testIdSlug);
-  const screenshotsDir = path.join(scopeDir, 'screenshots');
-  const reportFile   = path.join(scopeDir, `${testIdSlug}.html`);
+function registerGroup(group) {
+  const { state, year, appUrl, plans } = group;
+  const fullStateName = fullNameForStateCode(state);
+  const groupSlug = `${sanitizeForFs(fullStateName)}_${year}`;
+  const sharedDir = path.join(REPORT_DIR, '_shared', groupSlug);
+  const sharedScreenshotsDir = path.join(sharedDir, 'screenshots');
 
-  const describeTitle = scope.testId
-    || `Marketplace Plan Search — ${scope.state} · ${scope.year} · ${scope.planName}`;
+  const isSinglePlan = plans.length === 1;
+  const groupDescribeTitle = isSinglePlan
+    ? (plans[0].testId || `Marketplace Plan Search — ${state} · ${year} · ${plans[0].planName}`)
+    : `Marketplace Plan Search Batch — ${fullStateName} · ${year} (${plans.length} plans)`;
+  const groupTestTitle = isSinglePlan
+    ? `${plans[0].planName} — verify ${plans[0].searches.reduce((n, s) => n + s.expectedUrls.length, 0)} PDF URL(s) across ${plans[0].searches.length} search(es)`
+    : `Batch — verify ${plans.length} plans in ${fullStateName} ${year}`;
 
-  const testName        = `Marketplace Plan Search — ${scope.planName} (${fullNameForStateCode(scope.state)} · ${scope.year})`;
-
-  const primary = scope.searches[0];
-  const totalUrls = scope.searches.reduce((n, s) => n + s.expectedUrls.length, 0);
-  const searchLabels = scope.searches
-    .map((s, i) => s.label ? s.label : `Search ${i + 1}`)
-    .join(' + ');
-  const testDescription =
-    `Launch Molina Marketplace , navigate through Member Resources → Forms & Documents, `
-    + `select state "${fullNameForStateCode(scope.state)}", toggle to coverage year ${scope.year}, `
-    + `search for plan "${scope.planName}", then validate the plan is opening in new tab `
-    + `for each document type (${searchLabels}).`;
-
-  base.describe(describeTitle, () => {
+  base.describe(groupDescribeTitle, () => {
     base.describe.configure({ retries: 0, mode: 'serial' });
 
-    const setupSteps = [];
-    const planCards  = [];
-    const runStart   = Date.now();
+    base(groupTestTitle, async ({ page, context }) => {
+      base.setTimeout(timeoutForGroup(group));
+      fs.mkdirSync(sharedScreenshotsDir, { recursive: true });
 
-    base.afterAll(async () => {
-      const durationMs = Date.now() - runStart;
+      const marketplace = new MarketplacePage(page);
+      const sharedSetupSteps = [];
+      let sharedSetupError = null;
+
+      // ══ Shared Steps 1..5 — run ONCE for the batch ══════════════
       try {
-        writeReport({
-          reportDir: scopeDir,
-          reportFile,
-          testMeta: {
-            name:        testName,
-            id:          scope.testId || `MP-PLANS-Row${scope.row}`,
-            module:      TEST_MODULE,
-            description: testDescription,
-            author:      TEST_AUTHOR,
-            environment: TEST_ENVIRONMENT || envLabelFromUrl(scope.appUrl),
-          },
-          appUrl:         scope.appUrl,
-          year:           scope.year,
-          accordionLabel: searchLabels,
-          setupSteps,
-          planCards,
-          responsiveShots: [],
-          durationMs,
-          timestamp: new Date().toLocaleString(),
-        });
-        logger.info('REPORT', `[${describeTitle}] Report written: ${reportFile}`);
-
-        // Also emit a small companion JSON so hooks/marketplacePlansSummary.js
-        // can build the consolidated dashboard without having to parse each
-        // per-plan HTML report (which can be many MB with embedded PNGs).
-        try {
-          const setupFailed = setupSteps.some(s => s.status === 'FAIL');
-          const cardFailed  = planCards.some(c => c.status === 'FAIL');
-          const overallStatus = (setupFailed || cardFailed) ? 'FAIL' : (planCards.length ? 'PASS' : 'FAIL');
-          const variantJson = path.join(scopeDir, 'variant.json');
-          fs.writeFileSync(variantJson, JSON.stringify({
-            schemaVersion: 1,
-            testId:      scope.testId,
-            planName:    scope.planName,
-            state:       scope.state,
-            year:        scope.year,
-            appUrl:      scope.appUrl,
-            searchLabels,
-            status:      overallStatus,
-            durationMs,
-            testName,
-            testDescription,
-            setupSteps:  setupSteps.map(s => ({
-              id:         s.id,
-              name:       s.name,
-              status:     s.status,
-              durationMs: s.durationMs,
-              // Trim long text fields so the JSON stays small — the standalone
-              // report still has the full detail if a reviewer needs it.
-              expected:   (s.expected || '').substring(0, 500),
-              actual:     (s.actual   || '').substring(0, 800),
-            })),
-            planCards:   planCards.map(c => ({
-              id:          c.id,
-              name:        c.name,
-              status:      c.status,
-              expectedUrl: c.expectedUrl,
-              pdfUrl:      c.pdfUrl,
-              href:        c.href,
-              error:       c.error,
-              validations: (c.validations || []).map(v => ({
-                name:        v.name,
-                status:      v.status,
-                description: (v.description || '').substring(0, 300),
-              })),
-            })),
-            reportFile: path.relative(path.join(process.cwd(), 'reports', 'marketplace-plans'), reportFile)
-                              .split(path.sep).join('/'),
-          }, null, 2), 'utf8');
-        } catch (jsonErr) {
-          logger.warn('REPORT', `[${describeTitle}] Variant JSON write failed: ${jsonErr.message.substring(0, 160)}`);
-        }
-      } catch (repErr) {
-        logger.warn('REPORT', `[${describeTitle}] Failed to write report: ${repErr.message}`);
-      }
-    });
-
-    base(`${scope.planName} — verify ${totalUrls} PDF URL(s) across ${scope.searches.length} search(es)`,
-      async ({ page, context }) => {
-        fs.mkdirSync(screenshotsDir, { recursive: true });
-        const marketplace = new MarketplacePage(page);
-
-        // ── Step 1 — Launch Application URL ──────────────────────────
+        // ── Step 1 — Launch Application URL ──
         await base.step('Step 1 — Launch Application URL', async () => {
           const t0 = Date.now();
           let launchOk = true;
           let launchErr = '';
           try {
-            await marketplace.open(scope.appUrl);
+            await marketplace.open(appUrl);
           } catch (err) {
             launchOk = false;
             launchErr = (err && err.message) ? err.message.substring(0, 200) : String(err);
           }
-          const shot = path.join(screenshotsDir, 'Step1_Marketplace_Home.png');
+          const shot = path.join(sharedScreenshotsDir, 'Step1_Marketplace_Home.png');
           await marketplace.saveScreenshot(shot);
-          pushSetupStep(setupSteps, {
+          pushSetupStep(sharedSetupSteps, {
             id: 1,
             name: 'Launch Application URL',
             expected: 'Molina home page should load successfully.',
@@ -443,9 +445,7 @@ function registerScope(scope) {
           if (!launchOk) throw new Error(`Step 1 failed: ${launchErr}`);
         });
 
-        // ── Step 2 — Open Member Resources Menu ──────────────────────
-        // (Cookies are handled implicitly during Step 1's launch flow, so
-        // there is no separate "Accept cookies" step in the report.)
+        // ── Step 2 — Open Member Resources Menu ──
         await base.step('Step 2 — Open Member Resources Menu', async () => {
           const t0 = Date.now();
           let ok = true;
@@ -456,9 +456,9 @@ function registerScope(scope) {
             ok = false;
             errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
           }
-          const shot = path.join(screenshotsDir, 'Step2_Member_Resources_Menu.png');
+          const shot = path.join(sharedScreenshotsDir, 'Step2_Member_Resources_Menu.png');
           await marketplace.saveScreenshot(shot);
-          pushSetupStep(setupSteps, {
+          pushSetupStep(sharedSetupSteps, {
             id: 2,
             name: 'Open Member Resources Menu',
             expected: 'Member Resources menu should be opened successfully.',
@@ -473,7 +473,7 @@ function registerScope(scope) {
           if (!ok) throw new Error(`Step 2 failed: ${errMsg}`);
         });
 
-        // ── Step 3 — Open Forms & Documents Page ──────────────────────
+        // ── Step 3 — Open Forms & Documents Page ──
         await base.step('Step 3 — Open Forms & Documents Page', async () => {
           const t0 = Date.now();
           let ok = true;
@@ -484,9 +484,9 @@ function registerScope(scope) {
             ok = false;
             errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
           }
-          const shot = path.join(screenshotsDir, 'Step3_Forms_And_Documents.png');
+          const shot = path.join(sharedScreenshotsDir, 'Step3_Forms_And_Documents.png');
           await marketplace.saveScreenshot(shot);
-          pushSetupStep(setupSteps, {
+          pushSetupStep(sharedSetupSteps, {
             id: 3,
             name: 'Open Forms & Documents Page',
             expected: 'Forms & Documents page should be loaded successfully.',
@@ -501,22 +501,17 @@ function registerScope(scope) {
           if (!ok) throw new Error(`Step 3 failed: ${errMsg}`);
         });
 
-        // ── Step 4 — Select State (verify default year 2026) ────────────
-        // Use the FULL state name (e.g. "Ohio") in the step title and the
-        // step name — pulled from the dropdown's own <option> label so it
-        // always matches Molina's spelling. The 2-letter code (e.g. "OH")
-        // is still what selectState() looks up.
-        const fullStateName = fullNameForStateCode(scope.state);
+        // ── Step 4 — Select State (verify default year 2026) ──
         await base.step(`Step 4 — Select state ${fullStateName}`, async () => {
           const t0 = Date.now();
-          const res = await marketplace.selectState(scope.state);
+          const res = await marketplace.selectState(state);
           if (!res.selected) {
             const msg = res.reason === 'not-in-dropdown'
               ? `State "${fullStateName}" is not available in the dropdown. Available: [${res.availableStates.join(', ')}]`
               : `Failed to select state "${fullStateName}": ${res.errorMessage || res.reason}`;
-            const shot = path.join(screenshotsDir, 'Step4_State_Select_FAIL.png');
+            const shot = path.join(sharedScreenshotsDir, 'Step4_State_Select_FAIL.png');
             await marketplace.saveScreenshot(shot);
-            pushSetupStep(setupSteps, {
+            pushSetupStep(sharedSetupSteps, {
               id: 4,
               name: `Select state ${fullStateName}`,
               expected: `State "${fullStateName}" should be selected and the page should default to Coverage Year 2026.`,
@@ -529,7 +524,6 @@ function registerScope(scope) {
             throw new Error(msg);
           }
 
-          // Scroll the state/year/filter section into view before evidence.
           await marketplace.scrollToAllFormsAndDocuments();
 
           const activeYear  = await marketplace.getActiveYear();
@@ -537,9 +531,9 @@ function registerScope(scope) {
           const yearInUrl   = marketplace.getYearFromUrl(url);
           const defaultOk   = yearInUrl === '2026' || activeYear === '2026';
 
-          const shot = path.join(screenshotsDir, 'Step4_State_Selected.png');
+          const shot = path.join(sharedScreenshotsDir, 'Step4_State_Selected.png');
           await marketplace.saveScreenshot(shot, { preserveScroll: true });
-          pushSetupStep(setupSteps, {
+          pushSetupStep(sharedSetupSteps, {
             id: 4,
             name: `Select state ${fullStateName}`,
             expected: `State "${fullStateName}" should be selected and the page should default to Coverage Year 2026.`,
@@ -554,289 +548,378 @@ function registerScope(scope) {
           expect(defaultOk, `Expected default coverage year 2026 after selecting state; got activeYear=${activeYear}, urlYear=${yearInUrl}`).toBeTruthy();
         });
 
-        // ── Step 5 — Toggle to Coverage Year (scope.year) ────────────────
-        await base.step(`Step 5 — Toggle Coverage Year to ${scope.year}`, async () => {
+        // ── Step 5 — Toggle to Coverage Year ──
+        await base.step(`Step 5 — Toggle Coverage Year to ${year}`, async () => {
           const t0 = Date.now();
-          await marketplace.selectCoverageYear(scope.year);
+          await marketplace.selectCoverageYear(year);
           await marketplace.scrollToAllFormsAndDocuments();
           const url         = page.url();
           const yearInUrl   = marketplace.getYearFromUrl(url);
           const activeYear  = await marketplace.getActiveYear();
-          const urlOk       = yearInUrl === String(scope.year);
-          const statusOk    = urlOk && (activeYear == null || activeYear === String(scope.year));
+          const urlOk       = yearInUrl === String(year);
+          const statusOk    = urlOk && (activeYear == null || activeYear === String(year));
 
-          const shot = path.join(screenshotsDir, `Step5_Year_${scope.year}.png`);
+          const shot = path.join(sharedScreenshotsDir, `Step5_Year_${year}.png`);
           await marketplace.saveScreenshot(shot, { preserveScroll: true });
-          pushSetupStep(setupSteps, {
+          pushSetupStep(sharedSetupSteps, {
             id: 5,
-            name: `Toggle Coverage Year to ${scope.year}`,
-            expected: `Coverage Year ${scope.year} should become active.`,
+            name: `Toggle Coverage Year to ${year}`,
+            expected: `Coverage Year ${year} should become active.`,
             actual: statusOk
-              ? `Coverage Year ${scope.year} is now active.\nURL: ${url}`
-              : `Coverage Year ${scope.year} did not become active. Active year: "${activeYear || '(unknown)'}".\nURL: ${url}`,
+              ? `Coverage Year ${year} is now active.\nURL: ${url}`
+              : `Coverage Year ${year} did not become active. Active year: "${activeYear || '(unknown)'}".\nURL: ${url}`,
             status: statusOk ? 'PASS' : 'FAIL',
             durationMs: Date.now() - t0,
             screenshotPath: shot,
-            screenshotLabel: `Coverage year ${scope.year}`,
+            screenshotLabel: `Coverage year ${year}`,
           });
-          expect(urlOk, `Expected URL to contain year=${scope.year} after toggling; got ${url}`).toBeTruthy();
+          expect(urlOk, `Expected URL to contain year=${year} after toggling; got ${url}`).toBeTruthy();
+        });
+      } catch (err) {
+        sharedSetupError = err;
+        logger.warn('BATCH',
+          `Shared setup failed for [${state} · ${year}]: `
+          + `${(err && err.message ? err.message : String(err)).substring(0, 200)}`);
+      }
+
+      // ══ Per-plan loop ════════════════════════════════════════
+      const failedPlans = [];
+      for (let planIdx = 0; planIdx < plans.length; planIdx++) {
+        const scope = plans[planIdx];
+        const isFirst = planIdx === 0;
+        const testIdSlug     = scope.testId ? sanitizeForFs(scope.testId) : `Row${scope.row}`;
+        const shortCode      = scope.testId ? scope.testId.split(/\s+/)[0] : `Row${scope.row}`;
+        const scopeDir       = path.join(REPORT_DIR, testIdSlug);
+        const screenshotsDir = path.join(scopeDir, 'screenshots');
+        const reportFile     = path.join(scopeDir, `${testIdSlug}.html`);
+        fs.mkdirSync(screenshotsDir, { recursive: true });
+
+        // Each plan owns its own setupSteps (seeded with the shared 1..5)
+        // and planCards so per-plan reports + variant.json look identical
+        // to what standalone (non-batch) runs produce.
+        const setupSteps = sharedSetupSteps.map(s => ({ ...s }));
+        const planCards  = [];
+        const planStart  = Date.now();
+        let planError    = null;
+
+        await base.step(`Plan ${planIdx + 1}/${plans.length} — ${scope.planName}`, async () => {
+          if (sharedSetupError) {
+            planError = sharedSetupError;
+            return;
+          }
+          try {
+            if (!isFirst) {
+              await resetBetweenPlans({ marketplace, page, appUrl, state, year });
+            }
+
+            let planCardIndex = 0;
+            let stepId = 6;
+
+            // Filter state is tracked across the EN + ES passes because
+            // Molina preserves the Audience/Category selection in the URL
+            // query when the language toggles. Between PLANS (outer loop)
+            // the reset step navigates to a clean URL that drops those
+            // params, so this is naturally scoped per-plan.
+            let prevAudience = null;
+            let prevCategory = null;
+
+            const languagePasses = [
+              { code: 'en', label: 'EN', switchBefore: false },
+              { code: 'es', label: 'ES', switchBefore: true  },
+            ];
+
+            for (let passIdx = 0; passIdx < languagePasses.length; passIdx++) {
+              const pass = languagePasses[passIdx];
+
+              if (pass.switchBefore) {
+                const switchStepId = stepId++;
+                await base.step(`Step ${switchStepId} — Switch site language to Spanish`, async () => {
+                  const t0 = Date.now();
+                  let ok = true;
+                  let errMsg = '';
+                  const urlBefore = page.url();
+                  try {
+                    await marketplace.switchLanguage('es');
+                    await marketplace.scrollToAllFormsAndDocuments();
+                  } catch (err) {
+                    ok = false;
+                    errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                  }
+                  const urlAfter = page.url();
+                  const urlOk = /\/es-us\//i.test(urlAfter);
+                  const passStatus = ok && urlOk;
+
+                  const shot = path.join(screenshotsDir, `Step${switchStepId}_LanguageSwitch_ES.png`);
+                  await marketplace.saveScreenshot(shot, { preserveScroll: true });
+                  pushSetupStep(setupSteps, {
+                    id: switchStepId,
+                    name: 'Switch site language to Spanish',
+                    expected: 'Language dropdown should open and selecting "Spanish" should navigate to a URL containing "/es-us/".',
+                    actual: passStatus
+                      ? `Language switched to Spanish successfully.\nURL before: ${urlBefore}\nURL after:  ${urlAfter}`
+                      : ok
+                        ? `Clicked "Spanish" but URL did not switch to /es-us/. URL after: ${urlAfter}`
+                        : `Failed to switch language: ${errMsg}`,
+                    status: passStatus ? 'PASS' : 'FAIL',
+                    durationMs: Date.now() - t0,
+                    screenshotPath: shot,
+                    screenshotLabel: 'Site language switched to Spanish',
+                  });
+                  if (!passStatus) throw new Error(`Language switch to Spanish failed: ${errMsg || 'URL still English'}`);
+                });
+              }
+
+              for (let searchIdx = 0; searchIdx < scope.searches.length; searchIdx++) {
+                const search = scope.searches[searchIdx];
+                const isFirstSearch = searchIdx === 0;
+                const baseLabel = search.label || `Search ${searchIdx + 1}`;
+                const label = `${baseLabel} · ${pass.label}`;
+
+                const filterStepId = stepId++;
+                const filterStepTitle = isFirstSearch
+                  ? `Step ${filterStepId} — Apply filters [${label}] (Audience="${search.audience}", Category="${search.category}")`
+                  : `Step ${filterStepId} — Change filters to [${label}] (uncheck Audience="${prevAudience}", check Audience="${search.audience}")`;
+
+                await base.step(filterStepTitle, async () => {
+                  const t0 = Date.now();
+                  let ok = true;
+                  let errMsg = '';
+                  const actions = [];
+                  try {
+                    await marketplace.scrollToAllFormsAndDocuments();
+                    if (prevAudience && prevAudience !== search.audience) {
+                      await marketplace.unselectFilterOption('Audience', prevAudience);
+                      actions.push(`unchecked Audience="${prevAudience}"`);
+                    }
+                    if (search.audience && search.audience !== prevAudience) {
+                      await marketplace.selectFilterOption('Audience', search.audience);
+                      actions.push(`checked Audience="${search.audience}"`);
+                    }
+                    if (prevCategory && prevCategory !== search.category) {
+                      await marketplace.unselectFilterOption('Category', prevCategory);
+                      actions.push(`unchecked Category="${prevCategory}"`);
+                    }
+                    if (search.category && search.category !== prevCategory) {
+                      await marketplace.selectFilterOption('Category', search.category);
+                      actions.push(`checked Category="${search.category}"`);
+                    }
+                  } catch (err) {
+                    ok = false;
+                    errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                  }
+                  await marketplace.scrollToAllFormsAndDocuments();
+                  const shot = path.join(screenshotsDir, `Step${filterStepId}_Filters_${sanitizeForFs(label)}.png`);
+                  await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                  const expected = isFirstSearch
+                    ? `Audience "${search.audience}" and Category "${search.category}" filters should be applied for [${label}].`
+                    : `Filters should transition from [${(scope.searches[searchIdx - 1].label || `Search ${searchIdx}`) + ' · ' + pass.label}] to [${label}]: uncheck Audience="${prevAudience}", check Audience="${search.audience}" (Category unchanged).`;
+                  const actualDone = actions.length ? actions.join('; ') : 'no filter changes required';
+                  pushSetupStep(setupSteps, {
+                    id: filterStepId,
+                    name: isFirstSearch
+                      ? `Apply filters for [${label}]`
+                      : `Change filters to [${label}]`,
+                    expected,
+                    actual: ok
+                      ? `Filters ready for [${label}]: ${actualDone}.`
+                      : `Failed to apply filters for [${label}]: ${errMsg}`,
+                    status: ok ? 'PASS' : 'FAIL',
+                    durationMs: Date.now() - t0,
+                    screenshotPath: shot,
+                    screenshotLabel: `Filters — ${label}`,
+                  });
+                  if (!ok) throw new Error(`Step ${filterStepId} failed: ${errMsg}`);
+                });
+
+                prevAudience = search.audience || prevAudience;
+                prevCategory = search.category || prevCategory;
+
+                const searchStepId = stepId++;
+                let resolvedTargets = [];
+                let allNameCards = [];
+                await base.step(`Step ${searchStepId} — Search "${scope.planName}" [${label}]`, async () => {
+                  const t0 = Date.now();
+                  await marketplace.searchByPlanName(scope.planName);
+                  await marketplace.scrollToAllFormsAndDocuments();
+
+                  allNameCards = await marketplace.findResultCardsByName(scope.planName);
+
+                  resolvedTargets = [];
+                  for (const rawExpected of search.expectedUrls) {
+                    const expectedUrl = absolutizeUrl(rawExpected, scope.appUrl);
+                    const card = await marketplace.findCardByNameAndUrl(scope.planName, expectedUrl);
+                    resolvedTargets.push({ expectedUrl, card });
+                  }
+
+                  const shot = path.join(screenshotsDir, `Step${searchStepId}_Search_${sanitizeForFs(label)}.png`);
+                  await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                  const matchedCount = resolvedTargets.filter(t => t.card).length;
+                  const enough = allNameCards.length > 0;
+
+                  const lineFor = (t, i) => {
+                    const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
+                                   : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
+                                   : `#${i + 1}`;
+                    return t.card
+                      ? `• ${langHint} PDF matched: ${t.card.href}`
+                      : `• ${langHint} PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
+                  };
+                  const linesJoined = resolvedTargets.map(lineFor).join('\n');
+
+                  const actual = enough
+                    ? `Plan "${scope.planName}" is present in the search results.\n`
+                      + `Total cards containing plan name: ${allNameCards.length}\n`
+                      + `Matched PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
+                      + linesJoined
+                    : `Plan "${scope.planName}" is NOT present in the search results.\n`
+                      + `Total cards containing plan name: 0`;
+
+                  pushSetupStep(setupSteps, {
+                    id: searchStepId,
+                    name: `Search for plan "${scope.planName}" [${label}]`,
+                    expected: `Plan should be searchable and should be available in searched results. Pdf should be available for english and spanish version.`,
+                    actual,
+                    status: enough ? 'PASS' : 'FAIL',
+                    durationMs: Date.now() - t0,
+                    screenshotPath: shot,
+                    screenshotLabel: `Search results [${label}] — ${scope.planName}`,
+                  });
+                  expect(enough,
+                    `[${label}] No result cards contain the plan name "${scope.planName}". See setup step ${searchStepId} evidence.`
+                  ).toBeTruthy();
+                });
+
+                for (let i = 0; i < resolvedTargets.length; i++) {
+                  const t = resolvedTargets[i];
+                  planCardIndex += 1;
+                  await validateOnePlanUrl({
+                    index:       planCardIndex,
+                    expectedUrl: t.expectedUrl,
+                    card:        t.card,
+                    planName:    scope.planName,
+                    labelPrefix: `[${label}] `,
+                    marketplace,
+                    context,
+                    screenshotsDir,
+                    shotPrefix:  shortCode,
+                    planCards,
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            planError = err;
+            logger.warn('BATCH',
+              `Plan "${scope.planName}" (${scope.testId || '?'}) failed: `
+              + `${(err && err.message ? err.message : String(err)).substring(0, 200)}`);
+          }
         });
 
-        // ── Steps 6/7 + 8/9 + … — One filter+search+validate cycle per entry
-        //                          in scope.searches (typically 1–2 cycles).
-        //
-        // For the first cycle (primary search from the `Plans` sheet):
-        //   * Step 6: check Audience + Category checkboxes
-        //   * Step 7: type PlanName, search, resolve expected URLs
-        //   * Then per-URL PDF validation as plan cards
-        //
-        // For each additional cycle (from `AdditionalSearches` sheet):
-        //   * Step N: uncheck the PREVIOUS cycle's Audience, then check the
-        //             new Audience (Category re-applied only if different)
-        //   * Step N+1: search PlanName again, resolve expected URLs
-        //   * Plan cards continue numbering globally so all evidence lives
-        //     in ONE report.
-        //
-        // Plan-card names are prefixed with `[<Label>]` so the report
-        // clearly groups SBC vs SOB (or whatever document types are used).
-        //
-        // Two language passes are run back-to-back on the SAME page (no
-        // re-navigation from the home page for Spanish):
-        //   1. English pass  — filter + search + verify for every search
-        //   2. Language switch step (clicks the header Language dropdown)
-        //   3. Spanish pass  — same searches repeated, labels get " · ES"
-        // Plan-card names use [<Label> · EN] / [<Label> · ES] so the report
-        // clearly separates the two language halves.
-        let planCardIndex = 0;
-        let stepId = 6;
+        const planDurationMs = Date.now() - planStart;
 
-        // Each language pass resets its own filter state because the site
-        // may drop the Audience/Category selection when the URL prefix
-        // changes on language switch.
-        const languagePasses = [
-          { code: 'en', label: 'EN', switchBefore: false },
-          { code: 'es', label: 'ES', switchBefore: true  },
-        ];
+        // ── Write per-plan HTML report + variant.json (always, even on failure) ──
+        const searchLabels = scope.searches
+          .map((s, i) => s.label ? s.label : `Search ${i + 1}`)
+          .join(' + ');
+        const perPlanTestName = `Marketplace Plan Search — ${scope.planName} (${fullStateName} · ${scope.year})`;
+        const perPlanTestDescription =
+          `Launch Molina Marketplace , navigate through Member Resources → Forms & Documents, `
+          + `select state "${fullStateName}", toggle to coverage year ${scope.year}, `
+          + `search for plan "${scope.planName}", then validate the plan is opening in new tab `
+          + `for each document type (${searchLabels}).`;
+        const perPlanReportTag = scope.testId || `MP-PLANS-Row${scope.row}`;
 
-        for (const pass of languagePasses) {
-          // ── Optional language switch between passes ─────────────────
-          if (pass.switchBefore) {
-            const switchStepId = stepId++;
-            await base.step(`Step ${switchStepId} — Switch site language to Spanish`, async () => {
-              const t0 = Date.now();
-              let ok = true;
-              let errMsg = '';
-              const urlBefore = page.url();
-              try {
-                await marketplace.switchLanguage('es');
-                await marketplace.scrollToAllFormsAndDocuments();
-              } catch (err) {
-                ok = false;
-                errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-              }
-              const urlAfter = page.url();
-              const urlOk = /\/es-us\//i.test(urlAfter);
-              const passStatus = ok && urlOk;
-
-              const shot = path.join(screenshotsDir, `Step${switchStepId}_LanguageSwitch_ES.png`);
-              await marketplace.saveScreenshot(shot, { preserveScroll: true });
-              pushSetupStep(setupSteps, {
-                id: switchStepId,
-                name: 'Switch site language to Spanish',
-                expected: 'Language dropdown should open and selecting "Spanish" should navigate to a URL containing "/es-us/".',
-                actual: passStatus
-                  ? `Language switched to Spanish successfully.\nURL before: ${urlBefore}\nURL after:  ${urlAfter}`
-                  : ok
-                    ? `Clicked "Spanish" but URL did not switch to /es-us/. URL after: ${urlAfter}`
-                    : `Failed to switch language: ${errMsg}`,
-                status: passStatus ? 'PASS' : 'FAIL',
-                durationMs: Date.now() - t0,
-                screenshotPath: shot,
-                screenshotLabel: 'Site language switched to Spanish',
-              });
-              if (!passStatus) throw new Error(`Language switch to Spanish failed: ${errMsg || 'URL still English'}`);
-            });
-          }
-
-          // Filter state is per-pass — the language switch may reset the
-          // Audience / Category UI, so treat each pass's first search as
-          // a fresh "apply filters" step.
-          let prevAudience = null;
-          let prevCategory = null;
-
-          for (let searchIdx = 0; searchIdx < scope.searches.length; searchIdx++) {
-            const search = scope.searches[searchIdx];
-            const isFirst = searchIdx === 0;
-            const baseLabel = search.label || `Search ${searchIdx + 1}`;
-            // Label used everywhere (step titles, screenshot filenames,
-            // plan-card prefixes) — includes the language tag so EN and
-            // ES artefacts never overwrite one another.
-            const label = `${baseLabel} · ${pass.label}`;
-
-          // ── Filter application / transition ─────────────────────────
-          const filterStepId = stepId++;
-          const filterStepTitle = isFirst
-            ? `Step ${filterStepId} — Apply filters [${label}] (Audience="${search.audience}", Category="${search.category}")`
-            : `Step ${filterStepId} — Change filters to [${label}] (uncheck Audience="${prevAudience}", check Audience="${search.audience}")`;
-
-          await base.step(filterStepTitle, async () => {
-            const t0 = Date.now();
-            let ok = true;
-            let errMsg = '';
-            const actions = [];
-            try {
-              // Ensure the filter sidebar is in the DOM/viewport before we
-              // reach for the Audience/Category accordions. The year toggle
-              // in Step 5 can leave the page scrolled to the top where the
-              // filter panel isn't yet visible, causing openFilterSection
-              // to time out waiting for `button.filterTitle`.
-              await marketplace.scrollToAllFormsAndDocuments();
-              if (!isFirst && prevAudience && prevAudience !== search.audience) {
-                await marketplace.unselectFilterOption('Audience', prevAudience);
-                actions.push(`unchecked Audience="${prevAudience}"`);
-              }
-              if (search.audience && search.audience !== prevAudience) {
-                await marketplace.selectFilterOption('Audience', search.audience);
-                actions.push(`checked Audience="${search.audience}"`);
-              }
-              if (!isFirst && prevCategory && prevCategory !== search.category) {
-                await marketplace.unselectFilterOption('Category', prevCategory);
-                actions.push(`unchecked Category="${prevCategory}"`);
-              }
-              if (search.category && search.category !== prevCategory) {
-                await marketplace.selectFilterOption('Category', search.category);
-                actions.push(`checked Category="${search.category}"`);
-              }
-            } catch (err) {
-              ok = false;
-              errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-            }
-            await marketplace.scrollToAllFormsAndDocuments();
-            const shot = path.join(screenshotsDir, `Step${filterStepId}_Filters_${sanitizeForFs(label)}.png`);
-            await marketplace.saveScreenshot(shot, { preserveScroll: true });
-
-            const expected = isFirst
-              ? `Audience "${search.audience}" and Category "${search.category}" filters should be applied for [${label}].`
-              : `Filters should transition from [${(scope.searches[searchIdx - 1].label || `Search ${searchIdx}`) + ' · ' + pass.label}] to [${label}]: uncheck Audience="${prevAudience}", check Audience="${search.audience}" (Category unchanged).`;
-            const actualDone = actions.length ? actions.join('; ') : 'no filter changes required';
-            pushSetupStep(setupSteps, {
-              id: filterStepId,
-              name: isFirst
-                ? `Apply filters for [${label}]`
-                : `Change filters to [${label}]`,
-              expected,
-              actual: ok
-                ? `Filters ready for [${label}]: ${actualDone}.`
-                : `Failed to apply filters for [${label}]: ${errMsg}`,
-              status: ok ? 'PASS' : 'FAIL',
-              durationMs: Date.now() - t0,
-              screenshotPath: shot,
-              screenshotLabel: `Filters — ${label}`,
-            });
-            if (!ok) throw new Error(`Step ${filterStepId} failed: ${errMsg}`);
+        try {
+          writeReport({
+            reportDir: scopeDir,
+            reportFile,
+            testMeta: {
+              name:        perPlanTestName,
+              id:          perPlanReportTag,
+              module:      TEST_MODULE,
+              description: perPlanTestDescription,
+              author:      TEST_AUTHOR,
+              environment: TEST_ENVIRONMENT || envLabelFromUrl(scope.appUrl),
+            },
+            appUrl:         scope.appUrl,
+            year:           scope.year,
+            accordionLabel: searchLabels,
+            setupSteps,
+            planCards,
+            responsiveShots: [],
+            durationMs: planDurationMs,
+            timestamp: new Date().toLocaleString(),
           });
+          logger.info('REPORT', `[${perPlanReportTag}] Report written: ${reportFile}`);
 
-          prevAudience = search.audience || prevAudience;
-          prevCategory = search.category || prevCategory;
-
-          // ── Search + resolve expected URLs to cards ─────────────────
-          const searchStepId = stepId++;
-          let resolvedTargets = [];
-          let allNameCards = [];
-          await base.step(`Step ${searchStepId} — Search "${scope.planName}" [${label}]`, async () => {
-            const t0 = Date.now();
-            await marketplace.searchByPlanName(scope.planName);
-            await marketplace.scrollToAllFormsAndDocuments();
-
-            // Loose diagnostic: how many cards on the results page contain
-            // the plan name (word-boundary match). This is what the report
-            // shows testers as "Total cards containing plan name: N" and
-            // is the pass criterion for Step 7 — Step 8+ then validates
-            // each expected URL individually.
-            allNameCards = await marketplace.findResultCardsByName(scope.planName);
-
-            // Per-URL strict resolution: for each ExpectedUrl try to bind
-            // to a card whose title equals PlanName AND whose href pathname
-            // matches. Cards that don't strictly resolve are still tracked
-            // and will be surfaced as FAIL in Step 8's per-plan validation.
-            resolvedTargets = [];
-            for (const rawExpected of search.expectedUrls) {
-              const expectedUrl = absolutizeUrl(rawExpected, scope.appUrl);
-              const card = await marketplace.findCardByNameAndUrl(scope.planName, expectedUrl);
-              resolvedTargets.push({ expectedUrl, card });
-            }
-
-            const shot = path.join(screenshotsDir, `Step${searchStepId}_Search_${sanitizeForFs(label)}.png`);
-            await marketplace.saveScreenshot(shot, { preserveScroll: true });
-
-            const matchedCount = resolvedTargets.filter(t => t.card).length;
-            const enough = allNameCards.length > 0;
-
-            // Per-URL lines: English/Spanish label when the URL path
-            // reveals the language; matched href on hit, expected path on miss.
-            const lineFor = (t, i) => {
-              const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
-                             : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
-                             : `#${i + 1}`;
-              return t.card
-                ? `• ${langHint} PDF matched: ${t.card.href}`
-                : `• ${langHint} PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
-            };
-            const linesJoined = resolvedTargets.map(lineFor).join('\n');
-
-            const actual = enough
-              ? `Plan "${scope.planName}" is present in the search results.\n`
-                + `Total cards containing plan name: ${allNameCards.length}\n`
-                + `Matched PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
-                + linesJoined
-              : `Plan "${scope.planName}" is NOT present in the search results.\n`
-                + `Total cards containing plan name: 0`;
-
-            pushSetupStep(setupSteps, {
-              id: searchStepId,
-              name: `Search for plan "${scope.planName}" [${label}]`,
-              expected: `Plan should be searchable and should be available in searched results. Pdf should be available for english and spanish version.`,
-              actual,
-              status: enough ? 'PASS' : 'FAIL',
-              durationMs: Date.now() - t0,
-              screenshotPath: shot,
-              screenshotLabel: `Search results [${label}] — ${scope.planName}`,
-            });
-            expect(enough,
-              `[${label}] No result cards contain the plan name "${scope.planName}". See setup step ${searchStepId} evidence.`
-            ).toBeTruthy();
-          });
-
-          // ── Per-plan PDF validation ─────────────────────────────────
-          // Plan cards from all searches flow into the same list, indexed
-          // globally 1..N. Each card's `name` is prefixed with [<label>]
-          // so testers see which search it came from at a glance.
-          for (let i = 0; i < resolvedTargets.length; i++) {
-            const t = resolvedTargets[i];
-            planCardIndex += 1;
-            await validateOnePlanUrl({
-              index:       planCardIndex,
-              expectedUrl: t.expectedUrl,
-              card:        t.card,
+          try {
+            const setupFailed = setupSteps.some(s => s.status === 'FAIL');
+            const cardFailed  = planCards.some(c => c.status === 'FAIL');
+            const overallStatus = (setupFailed || cardFailed) ? 'FAIL' : (planCards.length ? 'PASS' : 'FAIL');
+            const variantJson = path.join(scopeDir, 'variant.json');
+            fs.writeFileSync(variantJson, JSON.stringify({
+              schemaVersion: 1,
+              testId:      scope.testId,
               planName:    scope.planName,
-              labelPrefix: `[${label}] `,
-              marketplace,
-              context,
-              screenshotsDir,
-              shotPrefix:  shortCode,
-              planCards,
-            });
+              state:       scope.state,
+              year:        scope.year,
+              appUrl:      scope.appUrl,
+              searchLabels,
+              status:      overallStatus,
+              durationMs:  planDurationMs,
+              testName:    perPlanTestName,
+              testDescription: perPlanTestDescription,
+              setupSteps:  setupSteps.map(s => ({
+                id:         s.id,
+                name:       s.name,
+                status:     s.status,
+                durationMs: s.durationMs,
+                expected:   (s.expected || '').substring(0, 500),
+                actual:     (s.actual   || '').substring(0, 800),
+              })),
+              planCards:   planCards.map(c => ({
+                id:          c.id,
+                name:        c.name,
+                status:      c.status,
+                expectedUrl: c.expectedUrl,
+                pdfUrl:      c.pdfUrl,
+                href:        c.href,
+                error:       c.error,
+                validations: (c.validations || []).map(v => ({
+                  name:        v.name,
+                  status:      v.status,
+                  description: (v.description || '').substring(0, 300),
+                })),
+              })),
+              reportFile: path.relative(path.join(process.cwd(), 'reports', 'marketplace-plans'), reportFile)
+                                .split(path.sep).join('/'),
+            }, null, 2), 'utf8');
+          } catch (jsonErr) {
+            logger.warn('REPORT', `[${perPlanReportTag}] Variant JSON write failed: ${jsonErr.message.substring(0, 160)}`);
           }
-        }  // end inner for-searchIdx (searches within a language pass)
-        }  // end outer for-pass (language passes: EN, then ES)
-
-        // If any plan card failed, fail the whole test so CI catches it.
-        const failed = planCards.filter(c => c.status === 'FAIL');
-        if (failed.length) {
-          const names = failed.map(f => `#${f.id} ${f.name}`).join(', ');
-          throw new Error(`${failed.length} of ${planCards.length} URL validation(s) failed: ${names}`);
+        } catch (repErr) {
+          logger.warn('REPORT', `[${perPlanReportTag}] Failed to write report: ${repErr.message}`);
         }
-      });
+
+        if (planError || planCards.some(c => c.status === 'FAIL')) {
+          failedPlans.push(scope.testId || scope.planName);
+        }
+      }
+
+      // Final assertion — batch fails if shared setup failed or any plan failed.
+      if (sharedSetupError) {
+        throw new Error(
+          `Batch [${state} · ${year}] shared setup failed — ${plans.length} plan(s) not executed: `
+          + `${sharedSetupError.message}`);
+      }
+      if (failedPlans.length) {
+        throw new Error(
+          `${failedPlans.length} of ${plans.length} plan(s) failed in batch [${state} · ${year}]: `
+          + failedPlans.join(', '));
+      }
+    });
   });
 }
 

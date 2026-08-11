@@ -511,6 +511,82 @@ function renderDashboardHtml(plans) {
 `;
 }
 
+// ─── Flat "all-reports" share folder ──────────────────────────────────────
+
+/**
+ * Copy every per-plan HTML (already self-contained — screenshots inlined as
+ * data URIs) into a single flat folder `<rootDir>/all-reports/` alongside a
+ * copy of each `Consolidated-<STATE>.html` whose per-plan links have been
+ * rewritten to point at sibling files. Result: one folder that can be
+ * zipped, attached to email, or dropped into SharePoint as a single unit.
+ *
+ * Original per-plan subfolders and top-level Consolidated files are LEFT
+ * UNTOUCHED — this is purely additive so existing bookmarks keep working.
+ *
+ * @returns {{ flatDir: string, planCount: number, dashboardCount: number }}
+ */
+function flattenPlanReports({ rootDir, plans, dashboards }) {
+  const flatDir = path.join(rootDir, 'all-reports');
+  fs.mkdirSync(flatDir, { recursive: true });
+
+  // Wipe stale files from previous runs so removed plans don't linger.
+  try {
+    for (const f of fs.readdirSync(flatDir)) {
+      if (/\.html?$/i.test(f)) {
+        try { fs.unlinkSync(path.join(flatDir, f)); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* fresh folder — ignore */ }
+
+  // Map of `<folderName>/<basename>` → `<basename>` for consolidated link rewrite.
+  const linkRewrites = [];
+  let planCount = 0;
+  for (const p of plans) {
+    const reportFile = p.data && p.data.reportFile;
+    if (!reportFile) continue;
+    const base = path.basename(reportFile);
+    const src  = path.join(p.folder, base);
+    if (!fs.existsSync(src)) continue;
+    const dest = path.join(flatDir, base);
+    try {
+      fs.copyFileSync(src, dest);
+      planCount++;
+      linkRewrites.push({
+        from: `${p.folderName}/${base}`,
+        to:   base,
+      });
+    } catch (err) {
+      console.error(`[FLATTEN] Failed to copy ${src}: ${err && err.message}`);
+    }
+  }
+
+  // Drop in the consolidated dashboards with per-plan hrefs rewritten so
+  // they resolve to siblings inside all-reports/.
+  let dashboardCount = 0;
+  for (const d of dashboards || []) {
+    const srcFile = d.file;
+    if (!fs.existsSync(srcFile)) continue;
+    let html;
+    try { html = fs.readFileSync(srcFile, 'utf8'); }
+    catch { continue; }
+    for (const rw of linkRewrites) {
+      // Match both single- and double-quoted hrefs.
+      const fromEsc = rw.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      html = html.replace(new RegExp(`href="${fromEsc}"`, 'g'), `href="${rw.to}"`)
+                 .replace(new RegExp(`href='${fromEsc}'`, 'g'), `href='${rw.to}'`);
+    }
+    const destFile = path.join(flatDir, path.basename(srcFile));
+    try {
+      fs.writeFileSync(destFile, html, 'utf8');
+      dashboardCount++;
+    } catch (err) {
+      console.error(`[FLATTEN] Failed to write ${destFile}: ${err && err.message}`);
+    }
+  }
+
+  return { flatDir, planCount, dashboardCount };
+}
+
 // ─── Public entry ──────────────────────────────────────────────────────────
 
 function generatePlansDashboard({ rootDir }) {
@@ -549,7 +625,17 @@ function generatePlansDashboard({ rootDir }) {
     written.push({ file, state: state === '_UNKNOWN' ? '' : state, count: statePlans.length });
   }
 
-  return { written, count: plans.length };
+  // Additionally, collect every per-plan HTML + a link-rewritten copy of
+  // each consolidated dashboard into a single flat folder so the whole run
+  // can be shared as one attachment.
+  let flat = null;
+  try {
+    flat = flattenPlanReports({ rootDir, plans, dashboards: written });
+  } catch (err) {
+    console.error(`[FLATTEN] Skipped (${err && err.message})`);
+  }
+
+  return { written, count: plans.length, flat };
 }
 
 module.exports = { generatePlansDashboard };

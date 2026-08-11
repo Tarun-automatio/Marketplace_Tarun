@@ -46,10 +46,13 @@ module.exports = async function globalTeardown() {
   // ── Marketplace plan-search consolidated dashboard (per state) ────────
   const plansDir = path.join(process.cwd(), 'reports', 'marketplace-plans');
   try {
-    const { written, count } = generatePlansDashboard({ rootDir: plansDir });
+    const { written, count, flat } = generatePlansDashboard({ rootDir: plansDir });
     if (count > 0) {
       console.log(`[TEARDOWN] Marketplace plan-search dashboards written (${written.length} state file${written.length === 1 ? '' : 's'}, ${count} plan${count === 1 ? '' : 's'} total):`);
       for (const w of written) console.log(`  \u2022 ${w.file}  (${w.count} plan${w.count === 1 ? '' : 's'})`);
+      if (flat && (flat.planCount > 0 || flat.dashboardCount > 0)) {
+        console.log(`[TEARDOWN] Flat share folder: ${flat.flatDir}  (${flat.planCount} plan HTML${flat.planCount === 1 ? '' : 's'} + ${flat.dashboardCount} dashboard${flat.dashboardCount === 1 ? '' : 's'})`);
+      }
     } else {
       console.log('[TEARDOWN] No plan-search variant.json files found \u2014 dashboard skipped.');
     }
