@@ -230,11 +230,12 @@ const config = {
   },
 
   // ── Marketplace Plan Search suite ──────────────────────────────────────
-  // Extends the base marketplace flow (state → coverage-year toggle) with
-  // Audience/Category filters, plan-name search, and per-plan PDF URL
-  // validation. Each Excel row is one plan search that may open N PDFs
-  // (pipe-separated in the ExpectedUrls cell). Uses the same MarketplacePage
-  // (composition, not a new page class) plus new filter/search/card methods.
+  // SOB-only search flow. Each Excel row is one plan; the row's
+  // Audience/Category drive the filter (typically "Marketplace" /
+  // "Schedule of Benefits") and ExpectedUrls list the SOB PDFs the plan
+  // should surface (English + Spanish). The spec also verifies the
+  // Category filter accordion no longer exposes SBC ("Summary of Benefits")
+  // or EOC ("Evidence of Coverage") on the public UI.
   marketplacePlans: {
     urls: {
       appUrl: env('MARKETPLACE_PLANS_URL', 'https://pws-q3.molinahealthcare.com/'),
@@ -243,11 +244,6 @@ const config = {
     // If sheet is missing, unreadable, or has zero Run=Y rows → 0 tests.
     excelPath:  env('MARKETPLACE_PLANS_EXCEL',       path.join(process.cwd(), 'data', 'marketplace', 'MarketplacePlansData.xlsx')),
     excelSheet: env('MARKETPLACE_PLANS_EXCEL_SHEET', 'Plans'),
-    // Optional companion sheet: additional plan-name searches to run AFTER
-    // the primary one (from the `Plans` sheet). Rows are joined to a test
-    // via the `TestId` column. If the sheet is missing or empty, each test
-    // runs only its primary search.
-    additionalSearchesSheet: env('MARKETPLACE_PLANS_ADDITIONAL_SHEET', 'AdditionalSearches'),
     // Optional filters — narrow the matrix without editing the sheet.
     filters: {
       state: env('MARKETPLACE_PLANS_STATE', ''),
@@ -304,6 +300,80 @@ const config = {
     },
     report: {
       dir: path.join(process.cwd(), env('MARKETPLACE_PHARMACY_REPORT_DIR', 'reports/marketplace-pharmacy')),
+    },
+  },
+
+  // ── Marketplace Sitecore Docs (Requirement 2) ──────────────────────────
+  // Directly hit Sitecore-hosted plan document PDFs (SBC / EOC / OOC by
+  // default; SOB optionally) per state and per language, and verify:
+  //   • Chrome's PDF viewer mounts (embed[type="application/x-google-chrome-pdf"])
+  //   • The tab URL's filename matches the expected filename
+  //   • The embed's original-url attribute matches the requested URL
+  //   • The URL path contains the correct doc-type token (/SBC/, /EOC/, /OOC/)
+  //
+  // The tester Excel comes straight from the SharePoint plan list (which
+  // uses prod host www.molinahealthcare.com). At load time the spec
+  // rewrites the host to `hostRewrite.target` so tests hit the same env
+  // as every other marketplace suite (Q3 by default).
+  //
+  // Sheet columns (wide, one row per plan, 4 doc-types × 2 languages):
+  //   Run | TestId | State | RateCode | PlanCode | PlanName
+  //   SBC_Display | SBC_EN_Name | SBC_ES_Name | SBC_EN_URL | SBC_ES_URL
+  //   SOB_Display | SOB_EN_Name | SOB_ES_Name | SOB_EN_URL | SOB_ES_URL
+  //   EOC_Display | EOC_EN_Name | EOC_ES_Name | EOC_EN_URL | EOC_ES_URL
+  //   OOC_Display | OOC_EN_Name | OOC_ES_Name | OOC_EN_URL | OOC_ES_URL
+  //   Notes
+  marketplaceSitecoreDocs: {
+    excelPath:  env('MARKETPLACE_SITECORE_DOCS_EXCEL',
+                    path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceSitecoreDocsData.xlsx')),
+    excelSheet: env('MARKETPLACE_SITECORE_DOCS_SHEET', 'SitecoreDocs'),
+
+    // Doc-types included by default. User's requirement is SBC/EOC/OOC —
+    // add SOB via the env var when needed.
+    docTypes: String(env('MARKETPLACE_SITECORE_DOCS_TYPES', 'SBC,EOC,OOC'))
+      .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean),
+    // Languages included by default. Set to 'en' to skip Spanish, etc.
+    languages: String(env('MARKETPLACE_SITECORE_DOCS_LANGS', 'en,es'))
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Optional matrix filters — narrow the run without editing the sheet.
+    filters: {
+      state:    env('MARKETPLACE_SITECORE_DOCS_STATE',    ''),
+      docType:  env('MARKETPLACE_SITECORE_DOCS_DOCTYPE',  ''),  // SBC / EOC / OOC / SOB
+      language: env('MARKETPLACE_SITECORE_DOCS_LANGUAGE', ''),  // en / es
+      plan:     env('MARKETPLACE_SITECORE_DOCS_PLAN',     ''),  // substring on PlanName
+    },
+
+    // Host rewrite — Excel URLs come from SharePoint (prod host); tests
+    // run against Q3 by default. Both source + target are matched against
+    // the URL's hostname (case-insensitive).
+    hostRewrite: {
+      source: String(env('MARKETPLACE_SITECORE_DOCS_SOURCE_HOST', 'www.molinahealthcare.com'))
+        .toLowerCase(),
+      target: String(env('MARKETPLACE_SITECORE_DOCS_TARGET_HOST', 'pws-q3.molinahealthcare.com'))
+        .toLowerCase(),
+    },
+
+    // PDF viewer + request timings. Headless Chrome does NOT mount the
+    // built-in PDF viewer, so the embed wait is intentionally short — we
+    // fall through to the HTTP probe (which is fast + reliable) as soon
+    // as the embed check misses. Headed runs mount the embed in ~1-2s so
+    // 5s is still comfortably slack.
+    pdf: {
+      embedTimeoutMs:  env('MARKETPLACE_SITECORE_DOCS_EMBED_TIMEOUT_MS', 5000),
+      renderWaitMs:    env('MARKETPLACE_SITECORE_DOCS_RENDER_WAIT_MS',   1500),
+      requestTimeoutMs: env('MARKETPLACE_SITECORE_DOCS_REQUEST_TIMEOUT_MS', 30000),
+    },
+
+    test: {
+      id:          env('MARKETPLACE_SITECORE_DOCS_TEST_ID',     'MP-DOCS-001'),
+      module:      env('MARKETPLACE_SITECORE_DOCS_TEST_MODULE', 'Marketplace / Sitecore Docs'),
+      author:      env('MARKETPLACE_SITECORE_DOCS_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('MARKETPLACE_SITECORE_DOCS_TEST_ENVIRONMENT', ''),
+    },
+    report: {
+      dir: path.join(process.cwd(),
+                     env('MARKETPLACE_SITECORE_DOCS_REPORT_DIR', 'reports/marketplace-sitecore-docs')),
     },
   },
 };

@@ -869,6 +869,42 @@ class MarketplacePage {
     logger.info(this.logTag, `Filter unselected: ${sectionName}="${value}"`);
   }
 
+  /**
+   * Enumerate the checkbox options visible inside a filter accordion
+   * (Audience / Category). Opens the section first (idempotent) then reads
+   * every checkbox's `value` attribute + visible label text.
+   *
+   * The visible label often carries a count suffix like "Marketplace (52)";
+   * the returned `label` strips that suffix so callers can assert against
+   * clean names. `value` is the raw checkbox `value` attribute (what the
+   * site sends to its API — stable across UI copy changes).
+   *
+   * @param {string} sectionName — "Audience" | "Category"
+   * @returns {Promise<Array<{ value: string, label: string }>>}
+   */
+  async getFilterOptions(sectionName) {
+    await this.openFilterSection(sectionName);
+    const panelId = this.filterPanelIdFor(sectionName);
+    const scope = panelId
+      ? this.page.locator(`ul[id="${panelId}"]`)
+      : this.page;
+
+    const items = await scope.locator('li').evaluateAll((lis) =>
+      lis.map((li) => {
+        const cb = li.querySelector('input[type="checkbox"]');
+        const label = li.querySelector('label') || li;
+        const raw = (label.textContent || '').replace(/\s+/g, ' ').trim();
+        const cleaned = raw.replace(/\s*\(\s*\d+\s*\)\s*$/, '').trim();
+        return {
+          value: cb ? (cb.getAttribute('value') || '').trim() : '',
+          label: cleaned,
+        };
+      })
+    ).catch(() => []);
+
+    return items.filter((i) => i.value || i.label);
+  }
+
   // ─── Search box ────────────────────────────────────────────────────────
 
   searchInput() {

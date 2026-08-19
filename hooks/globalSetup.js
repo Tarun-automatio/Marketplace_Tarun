@@ -1,15 +1,14 @@
 /**
- * Slim cleanup for the standalone Plan Materials framework.
+ * Slim cleanup for the standalone Marketplace framework.
  *
  * Cleans the report folder(s) for the suite(s) being run so each new run
  * starts from a clean slate. Inspects `process.argv` to detect which spec
  * file was targeted:
  *
- *   • `playwright test tests/cy2027/planMaterials/...`     →  cleans reports/plan-materials
- *   • `playwright test tests/cy2027/drugs/...`              →  cleans reports/drug
- *   • `playwright test tests/marketplace/marketplace.spec.js`         →  cleans reports/marketplace-toggleCheck
- *   • `playwright test tests/marketplace/marketplacePlanSearch.spec.js` →  cleans reports/marketplace-plans
- *   • `playwright test` (no spec filter)                     →  cleans ALL suite reports
+ *   • `playwright test tests/marketplace/marketplace.spec.js`             →  cleans reports/marketplace-toggleCheck
+ *   • `playwright test tests/marketplace/marketplacePlanSearch.spec.js`   →  cleans reports/marketplace-plans
+ *   • `playwright test tests/marketplace/marketplaceDrugPharmacy.spec.js` →  cleans reports/marketplace-pharmacy
+ *   • `playwright test` (no spec filter)                                  →  cleans ALL suite reports
  *
  * `reports/test-results` (Playwright traces / videos / failure screenshots)
  * and the legacy `test-results/` folder are always cleaned regardless of
@@ -24,11 +23,10 @@ const path = require('path');
 
 // Map spec-path fragment → report folder that suite writes to.
 const SUITE_REPORTS = [
-  { match: /tests[\\/]cy2027[\\/]planMaterials/i, dir: 'reports/plan-materials' },
-  { match: /tests[\\/]cy2027[\\/]drugs/i,         dir: 'reports/drug' },
-  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i,    dir: 'reports/marketplace-plans' },
-  { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,   dir: 'reports/marketplace-pharmacy' },
-  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,               dir: 'reports/marketplace-toggleCheck' },
+  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i,      dir: 'reports/marketplace-plans' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,     dir: 'reports/marketplace-pharmacy' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceSitecoreDocs\.spec\.js/i,     dir: 'reports/marketplace-sitecore-docs' },
+  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,                 dir: 'reports/marketplace-toggleCheck' },
 ];
 
 // Always cleaned — Playwright's own artifact folders.

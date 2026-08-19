@@ -39,3 +39,9 @@ Desktop.ini
 coverage/
 *.tmp
 *.tgz
+
+# ── Local backup / snapshot data (never push) ────────────────────────────
+data/**/*_backup_*.xlsx
+data/**/*_pre-*.xlsx
+docs/reference/pageSnippets/*.docx
+*.spec.js.old

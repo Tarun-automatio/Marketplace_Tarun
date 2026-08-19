@@ -1,17 +1,21 @@
 /**
- * Marketplace — Plan Search + Per-Plan PDF Validation (batched)
+ * Marketplace — Plan Search + Per-Plan SOB PDF Validation (batched)
+ *
+ * NEW REQUIREMENT (2026-08):
+ *   The public Marketplace UI only exposes **SOB (Schedule of Benefits)**.
+ *   SBC and EOC are no longer surfaced on the public site. This spec:
+ *
+ *     1. Positively validates every plan's SOB PDF (English + Spanish)
+ *        opens in a new tab and its URL is a genuine SOB URL.
+ *     2. Negatively validates the Category filter accordion shows
+ *        "Schedule of Benefits" only — never "Summary of Benefits" (SBC)
+ *        or "Evidence of Coverage" (EOC).
  *
  * Excel rows are grouped by (State, Year, AppUrl) so the "launch →
  * Member Resources → Forms & Documents → state → year" nav runs ONCE per
- * batch. Each plan inside the batch then executes its own filter/search/
- * validate cycle in English + Spanish, and writes its OWN per-plan HTML
- * report + variant.json — downstream artifacts (per-plan reports,
- * consolidated dashboard) look identical to a per-plan run.
- *
- * Between plans in the same batch the framework switches UI language
- * back to English (idempotent) and navigates to a clean Forms & Documents
- * URL (state+year only) so Molina drops the previous plan's search +
- * filter query params. Failures in one plan do not stop subsequent plans.
+ * batch. Each plan inside the batch then executes its own SOB-only
+ * verify/filter/search/validate cycle in English + Spanish, and writes
+ * its OWN per-plan HTML report + variant.json.
  *
  * Business flow per plan (steps captured in the per-plan report):
  *   Step 1  Launch Marketplace URL                          (shared)
@@ -19,34 +23,30 @@
  *   Step 3  Open "Forms & Documents" page                   (shared)
  *   Step 4  Select state → capture default coverage year    (shared)
  *   Step 5  Click Coverage Year <year>                      (shared)
- *   Step 6  English pass — Apply filters (Audience+Category)
- *   Step 7  English pass — Type PlanName, click Search
- *   Step 8+ English pass — Additional searches (e.g. SOB)
- *   Step N  Switch site language to Spanish
- *   Step N+ Spanish pass — same filter+search cycle as English
- *   Per-URL plan cards then click each expected PDF link, capture the
- *   new-tab URL, and validate against ExpectedUrls[i].
+ *   Step 6  EN — Verify Category filter shows SOB only (SBC/EOC absent)
+ *   Step 7  EN — Apply filters (Audience=Marketplace, Category=Schedule of Benefits)
+ *   Step 8  EN — Type PlanName, click Search
+ *   Step 9  Switch site language to Spanish
+ *   Step 10 ES — Verify Category filter shows SOB only (SBC/EOC absent)
+ *   Step 11 ES — Apply filters (idempotent — same filters as EN)
+ *   Step 12 ES — Type PlanName, click Search
+ *   Per PDF card then clicks the matching link, captures the new-tab URL,
+ *   and validates:
+ *     • PDF opens in a new tab
+ *     • URL contains "SOB" (case-insensitive) and does NOT contain "SBC" or "EOC"
+ *     • PDF filename matches the expected filename from ExpectedUrls
  *
- * Data model (data/MarketplacePlansData.xlsx, sheet `Plans`):
+ * Data model (data/marketplace/MarketplacePlansData.xlsx, sheet `Plans`):
  *   Run           — 'Y' to include, anything else to skip
- *   TestId        — descriptive id, e.g. "TC001 MP-PLANS <Category> <Plan> OH-2027"
+ *   TestId        — descriptive id, e.g. "TC001 Molina Gold Core 1500 OH-2027"
  *   State         — 2-letter code (case-insensitive)
  *   Year          — coverage year to toggle to (default 2027)
- *   Audience      — checkbox value, e.g. "Member" / "Medicare"
- *   Category      — checkbox value, e.g. "Summary of Benefits"
+ *   Label         — 'SOB' (single search per plan now)
+ *   Audience      — 'Marketplace'
+ *   Category      — 'Schedule of Benefits'
  *   PlanName      — text typed into the search box + used to filter cards
- *   ExpectedUrls  — pipe-separated absolute or relative URLs; one per
- *                   matching card (in card DOM order)
- *
- * Framework reuse (nothing new introduced):
- *   • pages/marketplacePage.js — shared page object (extended with filter/
- *                                search/card helpers)
- *   • fixtures/planMaterialsFixture.js — NOT used (linear flow, no shared
- *                                accordion state to hand-off between tests)
- *   • utils/browserHelper.js   — launchFreshBrowser + stealth + cleanup
- *   • utils/screenshotHelpers.js — ensureValidScreenshot + real-PDF preview
- *   • helpers/evidencePanel.js — panel HTML builders
- *   • reporting/reportGenerator.js — writeReport (planCards shape)
+ *   ExpectedUrls  — pipe-separated absolute URLs; one per matching card
+ *                   (English + Spanish SOB PDFs)
  */
 
 const fs = require('fs');
@@ -80,7 +80,6 @@ const MPP = frameworkConfig.marketplacePlans;
 const APP_URL_DEFAULT = MPP.urls.appUrl;
 const EXCEL_PATH      = MPP.excelPath;
 const EXCEL_SHEET     = MPP.excelSheet;
-const ADDITIONAL_SHEET = MPP.additionalSearchesSheet || 'AdditionalSearches';
 
 const FILTER_STATE = String(MPP.filters.state || '').trim();
 const FILTER_YEAR  = String(MPP.filters.year  || '').trim();
@@ -92,8 +91,18 @@ const TEST_MODULE      = MPP.test.module;
 const TEST_AUTHOR      = MPP.test.author;
 const TEST_ENVIRONMENT = MPP.test.environment;
 
-const NEW_TAB_TIMEOUT    = frameworkConfig.pageLoadWaitMs   || 45000;
-const PDF_RENDER_WAIT    = frameworkConfig.waitAfterNetworkIdleMs || 2000;
+const NEW_TAB_TIMEOUT = frameworkConfig.pageLoadWaitMs   || 45000;
+const PDF_RENDER_WAIT = frameworkConfig.waitAfterNetworkIdleMs || 2000;
+
+// Doc-type detection used for the SOB-only URL rule. The regex is
+// anchored on non-alphanumeric boundaries (`/`, `_`, `.`, `-`) so a plan
+// name that coincidentally contains the letters "sob" cannot trip it, and
+// it matches both path segments (`/sob/`) and filename tokens (`SOBE_`).
+const DOC_TYPE_RE = {
+  SOB: /(?:^|[^a-z0-9])sob[a-z]?(?:[^a-z0-9]|\d|$)/i,
+  SBC: /(?:^|[^a-z0-9])sbc[a-z]?(?:[^a-z0-9]|\d|$)/i,
+  EOC: /(?:^|[^a-z0-9])eoc[a-z]?(?:[^a-z0-9]|\d|$)/i,
+};
 
 // ══════════════════════════════════════════════════════════════════════════
 // Helpers
@@ -101,7 +110,6 @@ const PDF_RENDER_WAIT    = frameworkConfig.waitAfterNetworkIdleMs || 2000;
 
 const norm = (v) => String(v == null ? '' : v).trim();
 
-/** Auto-detect environment label from an app URL. */
 function envLabelFromUrl(url) {
   const u = String(url || '');
   if (u.includes('pws-q3')) return 'Q3 (pws-q3)';
@@ -110,14 +118,6 @@ function envLabelFromUrl(url) {
   return 'PROD';
 }
 
-/**
- * Sanitize a descriptive TestId marketplace-style so it can be used as
- * both a filesystem folder AND a self-identifying report filename.
- * Rules (mirror tests/marketplace/marketplace.spec.js):
- *   - Strip Windows-invalid path chars (\ / : * ? " < > |)
- *   - Drop parentheses
- *   - Collapse whitespace to underscores
- */
 function sanitizeForFs(s) {
   return String(s || '')
     .replace(/[\\/:*?"<>|]/g, '-')
@@ -126,31 +126,7 @@ function sanitizeForFs(s) {
     .replace(/_+/g, '_');
 }
 
-/**
- * Normalize an expected URL for comparison against the actual PDF URL that
- * Chrome loads in the new tab. Compares by **pathname only** (case-insensitive,
- * trailing-slash-stripped) so environment-specific hosts — e.g. prod
- * `www.molinahealthcare.com` vs Q3 `pws-q3.molinahealthcare.com` — don't
- * cause false FAILs. Query string / fragment are ignored.
- */
-function normalizeUrlForCompare(url) {
-  if (!url) return '';
-  try {
-    const u = new URL(String(url));
-    return u.pathname.replace(/\/+$/, '').toLowerCase();
-  } catch {
-    return String(url).trim().toLowerCase()
-      .replace(/^https?:\/\/[^/]+/, '')   // drop scheme + host
-      .replace(/[?#].*$/, '')             // drop query + fragment
-      .replace(/\/+$/, '');               // drop trailing slash
-  }
-}
-
-/**
- * If an ExpectedUrls entry is a bare path (starts with `/`), prepend the
- * app URL's origin so the comparison keeps working after Molina serves the
- * PDF from an absolute Akamai host at click time.
- */
+/** Absolutize a bare `/path` against the app URL's origin. */
 function absolutizeUrl(u, baseAppUrl) {
   const s = String(u || '').trim();
   if (!s) return '';
@@ -164,29 +140,31 @@ function absolutizeUrl(u, baseAppUrl) {
   }
 }
 
-/**
- * Convert a 2-letter US state code to its full name for use in the report
- * (e.g. "OH" → "Ohio"). Only includes the 17 states Molina lists in its
- * marketplace state dropdown — for any other code the raw code is returned.
- */
+/** Lower-cased pathname portion of a URL (safe for malformed inputs). */
+function pathLower(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  try { return new URL(s).pathname.toLowerCase(); }
+  catch {
+    return s.toLowerCase()
+      .replace(/^https?:\/\/[^/]+/, '')
+      .replace(/[?#].*$/, '');
+  }
+}
+
+/** File name from a URL (e.g. `OH26SOBE_G1_1.pdf`). */
+function filenameFromUrl(url) {
+  const p = pathLower(url);
+  return (p.split('/').pop() || '').trim();
+}
+
 const STATE_CODE_TO_NAME = {
-  AZ: 'Arizona',
-  CA: 'California',
-  ID: 'Idaho',
-  IA: 'Iowa',
-  IL: 'Illinois',
-  KY: 'Kentucky',
-  MA: 'Massachusetts',
-  MI: 'Michigan',
-  MS: 'Mississippi',
-  NV: 'Nevada',
-  NM: 'New Mexico',
-  OH: 'Ohio',
-  TX: 'Texas',
-  UT: 'Utah',
-  VA: 'Virginia',
-  WA: 'Washington',
-  WI: 'Wisconsin',
+  AZ: 'Arizona',      CA: 'California',   ID: 'Idaho',
+  IA: 'Iowa',         IL: 'Illinois',     KY: 'Kentucky',
+  MA: 'Massachusetts',MI: 'Michigan',     MS: 'Mississippi',
+  NV: 'Nevada',       NM: 'New Mexico',   OH: 'Ohio',
+  TX: 'Texas',        UT: 'Utah',         VA: 'Virginia',
+  WA: 'Washington',   WI: 'Wisconsin',
 };
 function fullNameForStateCode(code) {
   const key = String(code || '').trim().toUpperCase();
@@ -216,56 +194,33 @@ function loadTestMatrix() {
   }
 
   const rows   = XLSX.utils.sheet_to_json(primarySheet, { defval: '' });
-  const active = rows.filter(r => norm(r.Run).toUpperCase() === 'Y');
-
-  // ── Companion sheet: additional searches joined by TestId ──────────────
-  // Each row = { TestId, Label, Audience, Category, ExpectedUrls }. Testers
-  // add one row per additional search-and-verify pass. Missing sheet or
-  // zero matching rows → the test just runs its primary search.
-  const addSheet = wb.Sheets[ADDITIONAL_SHEET];
-  const additionalRows = addSheet
-    ? XLSX.utils.sheet_to_json(addSheet, { defval: '' })
-    : [];
-
-  /** Build a `search` sub-object from a raw row (primary or additional). */
-  const toSearch = (r) => ({
-    label:        norm(r.Label),          // e.g. 'SBC', 'SOB'
-    audience:     norm(r.Audience),       // filter checkbox value
-    category:     norm(r.Category),       // filter checkbox value
-    expectedUrls: norm(r.ExpectedUrls)
-      .split('|')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  });
+  const active = rows.filter((r) => norm(r.Run).toUpperCase() === 'Y');
 
   const scopes = active.map((r, i) => {
-    const state    = norm(r.State).toUpperCase();
-    const year     = norm(r.Year);
-    const plan     = norm(r.PlanName);
-    const testId   = norm(r.TestId);
-
-    // Primary search from the `Plans` row.
-    const searches = [toSearch(r)];
-
-    // Additional searches: rows in AdditionalSearches whose TestId matches
-    // (case-insensitive). Preserved in sheet order.
-    const testIdKey = testId.toLowerCase();
-    additionalRows
-      .filter(ar => norm(ar.TestId).toLowerCase() === testIdKey)
-      .forEach(ar => searches.push(toSearch(ar)));
-
+    const state  = norm(r.State).toUpperCase();
+    const year   = norm(r.Year);
+    const plan   = norm(r.PlanName);
+    const testId = norm(r.TestId);
     return {
-      row:  i + 2,           // Excel row number (header is row 1)
+      row:  i + 2,
       testId,
       state,
       year:  year || String(frameworkConfig.marketplace?.years?.alternate || '2027'),
       planName: plan,
-      searches,
+      search: {
+        label:        norm(r.Label) || 'SOB',
+        audience:     norm(r.Audience) || 'Marketplace',
+        category:     norm(r.Category) || 'Schedule of Benefits',
+        expectedUrls: norm(r.ExpectedUrls)
+          .split('|')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      },
       appUrl:   APP_URL_DEFAULT,
       source:   'excel',
     };
   })
-  .filter((s) => s.state && s.planName && s.searches[0] && s.searches[0].expectedUrls.length > 0)
+  .filter((s) => s.state && s.planName && s.search.expectedUrls.length > 0)
   .filter((s) => !FILTER_STATE || s.state === FILTER_STATE.toUpperCase())
   .filter((s) => !FILTER_YEAR  || s.year  === FILTER_YEAR)
   .filter((s) => !FILTER_PLAN  || s.planName.toLowerCase().includes(FILTER_PLAN));
@@ -277,25 +232,17 @@ function loadTestMatrix() {
       `No Run=Y rows in ${path.basename(EXCEL_PATH)}${filters ? ` matching filter(s) ${filters}` : ''} — running 0 tests`);
     return [];
   }
-  const totalSearches = scopes.reduce((n, s) => n + s.searches.length, 0);
   logger.info('MP-PLANS',
-    `Loaded ${scopes.length} scope(s) with ${totalSearches} search(es) total from ${path.basename(EXCEL_PATH)}`);
+    `Loaded ${scopes.length} SOB scope(s) from ${path.basename(EXCEL_PATH)}`);
   return scopes;
 }
-
-// ══════════════════════════════════════════════════════════════════════════
-// Test registration
-// ══════════════════════════════════════════════════════════════════════════
 
 const TEST_MATRIX = loadTestMatrix();
 
 // ══════════════════════════════════════════════════════════════════════════
 // Batch grouping — bundle Excel rows into (State, Year, AppUrl) batches so
 // the "launch → Member Resources → Forms & Documents → state → year" nav
-// runs ONCE per batch instead of once per plan. Between plans in a batch,
-// the framework switches UI language back to English (idempotent) and
-// navigates to a clean Forms & Documents URL (state+year only) so Molina
-// drops the previous plan's search + filter query params.
+// runs ONCE per batch instead of once per plan.
 // ══════════════════════════════════════════════════════════════════════════
 
 function groupScopesByStateYear(scopes) {
@@ -310,9 +257,6 @@ function groupScopesByStateYear(scopes) {
   return Array.from(map.values());
 }
 
-// Empirical budgets used to size the Playwright per-test timeout so a
-// batch of 50+ plans doesn't hit the default cap. The batch finishes as
-// soon as its work is done regardless of the ceiling.
 const SHARED_SETUP_BUDGET_MS = 120_000;
 const PER_PLAN_BUDGET_MS     = 180_000;
 const BATCH_SLACK_MS         = 90_000;
@@ -321,7 +265,6 @@ function timeoutForGroup(group) {
   return SHARED_SETUP_BUDGET_MS + (group.plans.length * PER_PLAN_BUDGET_MS) + BATCH_SLACK_MS;
 }
 
-/** Clean Forms & Documents URL used to reset filters between plans in a batch. */
 function cleanFormsAndDocsUrl(appUrl, state, year) {
   const origin = new URL(appUrl).origin;
   const s = String(state || '').toLowerCase();
@@ -329,13 +272,6 @@ function cleanFormsAndDocsUrl(appUrl, state, year) {
   return `${origin}/member-resources/forms-documents?state=${s}&year=${y}`;
 }
 
-/**
- * Reset the page between plans inside a batch: switch UI language back to
- * English (idempotent), then goto the clean Forms & Documents URL so any
- * prior search + filter query params are dropped. Best-effort — failures
- * are logged; the next plan's Step 6 (filter apply) will surface a broken
- * state naturally.
- */
 async function resetBetweenPlans({ marketplace, page, appUrl, state, year }) {
   try {
     await marketplace.switchLanguage('en');
@@ -359,6 +295,29 @@ async function resetBetweenPlans({ marketplace, page, appUrl, state, year }) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Category-panel introspection — the negative check for SBC/EOC.
+// Returns { hasSOB, hasSBC, hasEOC, options } so callers can build the
+// PASS/FAIL step evidence.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function inspectCategoryPanel(marketplace) {
+  const options = await marketplace.getFilterOptions('Category');
+  const labels  = options.map((o) => o.label || '');
+  const values  = options.map((o) => o.value || '');
+  const haystack = [...labels, ...values].join(' | ');
+
+  const hasSOB = /schedule\s*of\s*benefits/i.test(haystack) || /\bsob\b/i.test(haystack);
+  const hasSBC = /summary\s*of\s*benefits/i.test(haystack)  || /\bsbc\b/i.test(haystack);
+  const hasEOC = /evidence\s*of\s*coverage/i.test(haystack) || /\beoc\b/i.test(haystack);
+
+  return { hasSOB, hasSBC, hasEOC, options };
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Test registration
+// ══════════════════════════════════════════════════════════════════════════
+
 if (TEST_MATRIX.length === 0) {
   base.describe('Marketplace Plan Search — matrix', () => {
     base('No plan-search scopes matched the current filters', () => {
@@ -375,18 +334,12 @@ if (TEST_MATRIX.length === 0) {
   const totalPlans = GROUPS.reduce((n, g) => n + g.plans.length, 0);
   logger.info('MP-PLANS',
     `Registering ${GROUPS.length} batch(es) covering ${totalPlans} plan(s): `
-    + GROUPS.map(g => `${g.state}·${g.year} (${g.plans.length})`).join(', '));
+    + GROUPS.map((g) => `${g.state}·${g.year} (${g.plans.length})`).join(', '));
   for (const group of GROUPS) registerGroup(group);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // registerGroup — one describe/test per (State, Year, AppUrl) batch.
-// Shared Steps 1..5 run once; each plan in the batch executes its own
-// filter/search/validate cycle (EN + ES) and writes its OWN per-plan HTML
-// report + variant.json so downstream artifacts (per-plan reports,
-// consolidated dashboard) look identical to a per-plan run. Failures in
-// one plan do not stop subsequent plans; the batch throws once at the
-// end if any plan failed.
 // ─────────────────────────────────────────────────────────────────────────
 
 function registerGroup(group) {
@@ -398,11 +351,11 @@ function registerGroup(group) {
 
   const isSinglePlan = plans.length === 1;
   const groupDescribeTitle = isSinglePlan
-    ? (plans[0].testId || `Marketplace Plan Search — ${state} · ${year} · ${plans[0].planName}`)
-    : `Marketplace Plan Search Batch — ${fullStateName} · ${year} (${plans.length} plans)`;
+    ? (plans[0].testId || `Marketplace SOB Search — ${state} · ${year} · ${plans[0].planName}`)
+    : `Marketplace SOB Search Batch — ${fullStateName} · ${year} (${plans.length} plans)`;
   const groupTestTitle = isSinglePlan
-    ? `${plans[0].planName} — verify ${plans[0].searches.reduce((n, s) => n + s.expectedUrls.length, 0)} PDF URL(s) across ${plans[0].searches.length} search(es)`
-    : `Batch — verify ${plans.length} plans in ${fullStateName} ${year}`;
+    ? `${plans[0].planName} — verify ${plans[0].search.expectedUrls.length} SOB PDF URL(s)`
+    : `Batch — verify SOB PDFs for ${plans.length} plans in ${fullStateName} ${year}`;
 
   base.describe(groupDescribeTitle, () => {
     base.describe.configure({ retries: 0, mode: 'serial' });
@@ -417,54 +370,40 @@ function registerGroup(group) {
 
       // ══ Shared Steps 1..5 — run ONCE for the batch ══════════════
       try {
-        // ── Step 1 — Launch Application URL ──
         await base.step('Step 1 — Launch Application URL', async () => {
           const t0 = Date.now();
-          let launchOk = true;
-          let launchErr = '';
-          try {
-            await marketplace.open(appUrl);
-          } catch (err) {
-            launchOk = false;
-            launchErr = (err && err.message) ? err.message.substring(0, 200) : String(err);
-          }
+          let ok = true, errMsg = '';
+          try { await marketplace.open(appUrl); }
+          catch (err) { ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err); }
           const shot = path.join(sharedScreenshotsDir, 'Step1_Marketplace_Home.png');
           await marketplace.saveScreenshot(shot);
           pushSetupStep(sharedSetupSteps, {
             id: 1,
             name: 'Launch Application URL',
             expected: 'Molina home page should load successfully.',
-            actual: launchOk
+            actual: ok
               ? `Home page loaded successfully.\nURL: ${page.url()}`
-              : `Failed to load home page: ${launchErr}`,
-            status: launchOk ? 'PASS' : 'FAIL',
+              : `Failed to load home page: ${errMsg}`,
+            status: ok ? 'PASS' : 'FAIL',
             durationMs: Date.now() - t0,
             screenshotPath: shot,
             screenshotLabel: 'Marketplace home',
           });
-          if (!launchOk) throw new Error(`Step 1 failed: ${launchErr}`);
+          if (!ok) throw new Error(`Step 1 failed: ${errMsg}`);
         });
 
-        // ── Step 2 — Open Member Resources Menu ──
         await base.step('Step 2 — Open Member Resources Menu', async () => {
           const t0 = Date.now();
-          let ok = true;
-          let errMsg = '';
-          try {
-            await marketplace.openMemberResources();
-          } catch (err) {
-            ok = false;
-            errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-          }
+          let ok = true, errMsg = '';
+          try { await marketplace.openMemberResources(); }
+          catch (err) { ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err); }
           const shot = path.join(sharedScreenshotsDir, 'Step2_Member_Resources_Menu.png');
           await marketplace.saveScreenshot(shot);
           pushSetupStep(sharedSetupSteps, {
             id: 2,
             name: 'Open Member Resources Menu',
             expected: 'Member Resources menu should be opened successfully.',
-            actual: ok
-              ? 'Member Resources menu opened successfully.'
-              : `Failed to open Member Resources menu: ${errMsg}`,
+            actual: ok ? 'Member Resources menu opened successfully.' : `Failed to open Member Resources menu: ${errMsg}`,
             status: ok ? 'PASS' : 'FAIL',
             durationMs: Date.now() - t0,
             screenshotPath: shot,
@@ -473,17 +412,11 @@ function registerGroup(group) {
           if (!ok) throw new Error(`Step 2 failed: ${errMsg}`);
         });
 
-        // ── Step 3 — Open Forms & Documents Page ──
         await base.step('Step 3 — Open Forms & Documents Page', async () => {
           const t0 = Date.now();
-          let ok = true;
-          let errMsg = '';
-          try {
-            await marketplace.openFormsAndDocuments();
-          } catch (err) {
-            ok = false;
-            errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-          }
+          let ok = true, errMsg = '';
+          try { await marketplace.openFormsAndDocuments(); }
+          catch (err) { ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err); }
           const shot = path.join(sharedScreenshotsDir, 'Step3_Forms_And_Documents.png');
           await marketplace.saveScreenshot(shot);
           pushSetupStep(sharedSetupSteps, {
@@ -501,7 +434,6 @@ function registerGroup(group) {
           if (!ok) throw new Error(`Step 3 failed: ${errMsg}`);
         });
 
-        // ── Step 4 — Select State (verify default year 2026) ──
         await base.step(`Step 4 — Select state ${fullStateName}`, async () => {
           const t0 = Date.now();
           const res = await marketplace.selectState(state);
@@ -525,11 +457,10 @@ function registerGroup(group) {
           }
 
           await marketplace.scrollToAllFormsAndDocuments();
-
-          const activeYear  = await marketplace.getActiveYear();
-          const url         = page.url();
-          const yearInUrl   = marketplace.getYearFromUrl(url);
-          const defaultOk   = yearInUrl === '2026' || activeYear === '2026';
+          const activeYear = await marketplace.getActiveYear();
+          const url        = page.url();
+          const yearInUrl  = marketplace.getYearFromUrl(url);
+          const defaultOk  = yearInUrl === '2026' || activeYear === '2026';
 
           const shot = path.join(sharedScreenshotsDir, 'Step4_State_Selected.png');
           await marketplace.saveScreenshot(shot, { preserveScroll: true });
@@ -548,16 +479,15 @@ function registerGroup(group) {
           expect(defaultOk, `Expected default coverage year 2026 after selecting state; got activeYear=${activeYear}, urlYear=${yearInUrl}`).toBeTruthy();
         });
 
-        // ── Step 5 — Toggle to Coverage Year ──
         await base.step(`Step 5 — Toggle Coverage Year to ${year}`, async () => {
           const t0 = Date.now();
           await marketplace.selectCoverageYear(year);
           await marketplace.scrollToAllFormsAndDocuments();
-          const url         = page.url();
-          const yearInUrl   = marketplace.getYearFromUrl(url);
-          const activeYear  = await marketplace.getActiveYear();
-          const urlOk       = yearInUrl === String(year);
-          const statusOk    = urlOk && (activeYear == null || activeYear === String(year));
+          const url        = page.url();
+          const yearInUrl  = marketplace.getYearFromUrl(url);
+          const activeYear = await marketplace.getActiveYear();
+          const urlOk      = yearInUrl === String(year);
+          const statusOk   = urlOk && (activeYear == null || activeYear === String(year));
 
           const shot = path.join(sharedScreenshotsDir, `Step5_Year_${year}.png`);
           await marketplace.saveScreenshot(shot, { preserveScroll: true });
@@ -594,19 +524,13 @@ function registerGroup(group) {
         const reportFile     = path.join(scopeDir, `${testIdSlug}.html`);
         fs.mkdirSync(screenshotsDir, { recursive: true });
 
-        // Each plan owns its own setupSteps (seeded with the shared 1..5)
-        // and planCards so per-plan reports + variant.json look identical
-        // to what standalone (non-batch) runs produce.
-        const setupSteps = sharedSetupSteps.map(s => ({ ...s }));
+        const setupSteps = sharedSetupSteps.map((s) => ({ ...s }));
         const planCards  = [];
         const planStart  = Date.now();
         let planError    = null;
 
         await base.step(`Plan ${planIdx + 1}/${plans.length} — ${scope.planName}`, async () => {
-          if (sharedSetupError) {
-            planError = sharedSetupError;
-            return;
-          }
+          if (sharedSetupError) { planError = sharedSetupError; return; }
           try {
             if (!isFirst) {
               await resetBetweenPlans({ marketplace, page, appUrl, state, year });
@@ -614,15 +538,6 @@ function registerGroup(group) {
 
             let planCardIndex = 0;
             let stepId = 6;
-
-            // Filter state is tracked across the EN + ES passes because
-            // Molina preserves the Audience/Category selection in the URL
-            // query when the language toggles. Between PLANS (outer loop)
-            // the reset step navigates to a clean URL that drops those
-            // params, so this is naturally scoped per-plan.
-            let prevAudience = null;
-            let prevCategory = null;
-
             const languagePasses = [
               { code: 'en', label: 'EN', switchBefore: false },
               { code: 'es', label: 'ES', switchBefore: true  },
@@ -631,19 +546,18 @@ function registerGroup(group) {
             for (let passIdx = 0; passIdx < languagePasses.length; passIdx++) {
               const pass = languagePasses[passIdx];
 
+              // ── Optional pre-step — Switch language to Spanish ──
               if (pass.switchBefore) {
                 const switchStepId = stepId++;
                 await base.step(`Step ${switchStepId} — Switch site language to Spanish`, async () => {
                   const t0 = Date.now();
-                  let ok = true;
-                  let errMsg = '';
+                  let ok = true, errMsg = '';
                   const urlBefore = page.url();
                   try {
                     await marketplace.switchLanguage('es');
                     await marketplace.scrollToAllFormsAndDocuments();
                   } catch (err) {
-                    ok = false;
-                    errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                    ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
                   }
                   const urlAfter = page.url();
                   const urlOk = /\/es-us\//i.test(urlAfter);
@@ -669,144 +583,158 @@ function registerGroup(group) {
                 });
               }
 
-              for (let searchIdx = 0; searchIdx < scope.searches.length; searchIdx++) {
-                const search = scope.searches[searchIdx];
-                const isFirstSearch = searchIdx === 0;
-                const baseLabel = search.label || `Search ${searchIdx + 1}`;
-                const label = `${baseLabel} · ${pass.label}`;
-
-                const filterStepId = stepId++;
-                const filterStepTitle = isFirstSearch
-                  ? `Step ${filterStepId} — Apply filters [${label}] (Audience="${search.audience}", Category="${search.category}")`
-                  : `Step ${filterStepId} — Change filters to [${label}] (uncheck Audience="${prevAudience}", check Audience="${search.audience}")`;
-
-                await base.step(filterStepTitle, async () => {
-                  const t0 = Date.now();
-                  let ok = true;
-                  let errMsg = '';
-                  const actions = [];
-                  try {
-                    await marketplace.scrollToAllFormsAndDocuments();
-                    if (prevAudience && prevAudience !== search.audience) {
-                      await marketplace.unselectFilterOption('Audience', prevAudience);
-                      actions.push(`unchecked Audience="${prevAudience}"`);
-                    }
-                    if (search.audience && search.audience !== prevAudience) {
-                      await marketplace.selectFilterOption('Audience', search.audience);
-                      actions.push(`checked Audience="${search.audience}"`);
-                    }
-                    if (prevCategory && prevCategory !== search.category) {
-                      await marketplace.unselectFilterOption('Category', prevCategory);
-                      actions.push(`unchecked Category="${prevCategory}"`);
-                    }
-                    if (search.category && search.category !== prevCategory) {
-                      await marketplace.selectFilterOption('Category', search.category);
-                      actions.push(`checked Category="${search.category}"`);
-                    }
-                  } catch (err) {
-                    ok = false;
-                    errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-                  }
+              // ── Verify Category filter shows SOB only (SBC / EOC absent) ──
+              const panelStepId = stepId++;
+              await base.step(`Step ${panelStepId} — Verify Category filter shows SOB only [${pass.label}]`, async () => {
+                const t0 = Date.now();
+                let panelInfo = { hasSOB: false, hasSBC: true, hasEOC: true, options: [] };
+                let errMsg = '';
+                try {
                   await marketplace.scrollToAllFormsAndDocuments();
-                  const shot = path.join(screenshotsDir, `Step${filterStepId}_Filters_${sanitizeForFs(label)}.png`);
-                  await marketplace.saveScreenshot(shot, { preserveScroll: true });
-
-                  const expected = isFirstSearch
-                    ? `Audience "${search.audience}" and Category "${search.category}" filters should be applied for [${label}].`
-                    : `Filters should transition from [${(scope.searches[searchIdx - 1].label || `Search ${searchIdx}`) + ' · ' + pass.label}] to [${label}]: uncheck Audience="${prevAudience}", check Audience="${search.audience}" (Category unchanged).`;
-                  const actualDone = actions.length ? actions.join('; ') : 'no filter changes required';
-                  pushSetupStep(setupSteps, {
-                    id: filterStepId,
-                    name: isFirstSearch
-                      ? `Apply filters for [${label}]`
-                      : `Change filters to [${label}]`,
-                    expected,
-                    actual: ok
-                      ? `Filters ready for [${label}]: ${actualDone}.`
-                      : `Failed to apply filters for [${label}]: ${errMsg}`,
-                    status: ok ? 'PASS' : 'FAIL',
-                    durationMs: Date.now() - t0,
-                    screenshotPath: shot,
-                    screenshotLabel: `Filters — ${label}`,
-                  });
-                  if (!ok) throw new Error(`Step ${filterStepId} failed: ${errMsg}`);
-                });
-
-                prevAudience = search.audience || prevAudience;
-                prevCategory = search.category || prevCategory;
-
-                const searchStepId = stepId++;
-                let resolvedTargets = [];
-                let allNameCards = [];
-                await base.step(`Step ${searchStepId} — Search "${scope.planName}" [${label}]`, async () => {
-                  const t0 = Date.now();
-                  await marketplace.searchByPlanName(scope.planName);
-                  await marketplace.scrollToAllFormsAndDocuments();
-
-                  allNameCards = await marketplace.findResultCardsByName(scope.planName);
-
-                  resolvedTargets = [];
-                  for (const rawExpected of search.expectedUrls) {
-                    const expectedUrl = absolutizeUrl(rawExpected, scope.appUrl);
-                    const card = await marketplace.findCardByNameAndUrl(scope.planName, expectedUrl);
-                    resolvedTargets.push({ expectedUrl, card });
-                  }
-
-                  const shot = path.join(screenshotsDir, `Step${searchStepId}_Search_${sanitizeForFs(label)}.png`);
-                  await marketplace.saveScreenshot(shot, { preserveScroll: true });
-
-                  const matchedCount = resolvedTargets.filter(t => t.card).length;
-                  const enough = allNameCards.length > 0;
-
-                  const lineFor = (t, i) => {
-                    const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
-                                   : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
-                                   : `#${i + 1}`;
-                    return t.card
-                      ? `• ${langHint} PDF matched: ${t.card.href}`
-                      : `• ${langHint} PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
-                  };
-                  const linesJoined = resolvedTargets.map(lineFor).join('\n');
-
-                  const actual = enough
-                    ? `Plan "${scope.planName}" is present in the search results.\n`
-                      + `Total cards containing plan name: ${allNameCards.length}\n`
-                      + `Matched PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
-                      + linesJoined
-                    : `Plan "${scope.planName}" is NOT present in the search results.\n`
-                      + `Total cards containing plan name: 0`;
-
-                  pushSetupStep(setupSteps, {
-                    id: searchStepId,
-                    name: `Search for plan "${scope.planName}" [${label}]`,
-                    expected: `Plan should be searchable and should be available in searched results. Pdf should be available for english and spanish version.`,
-                    actual,
-                    status: enough ? 'PASS' : 'FAIL',
-                    durationMs: Date.now() - t0,
-                    screenshotPath: shot,
-                    screenshotLabel: `Search results [${label}] — ${scope.planName}`,
-                  });
-                  expect(enough,
-                    `[${label}] No result cards contain the plan name "${scope.planName}". See setup step ${searchStepId} evidence.`
-                  ).toBeTruthy();
-                });
-
-                for (let i = 0; i < resolvedTargets.length; i++) {
-                  const t = resolvedTargets[i];
-                  planCardIndex += 1;
-                  await validateOnePlanUrl({
-                    index:       planCardIndex,
-                    expectedUrl: t.expectedUrl,
-                    card:        t.card,
-                    planName:    scope.planName,
-                    labelPrefix: `[${label}] `,
-                    marketplace,
-                    context,
-                    screenshotsDir,
-                    shotPrefix:  shortCode,
-                    planCards,
-                  });
+                  panelInfo = await inspectCategoryPanel(marketplace);
+                } catch (err) {
+                  errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
                 }
+
+                const { hasSOB, hasSBC, hasEOC, options } = panelInfo;
+                const passStatus = !errMsg && hasSOB && !hasSBC && !hasEOC;
+                const optList = options.map((o) => `• ${o.label || '(no label)'} [value="${o.value}"]`).join('\n') || '(no options detected)';
+
+                const shot = path.join(screenshotsDir, `Step${panelStepId}_CategoryPanel_${pass.label}.png`);
+                await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                const findings = [];
+                findings.push(hasSOB  ? '✓ "Schedule of Benefits" is available'    : '✗ "Schedule of Benefits" is MISSING');
+                findings.push(!hasSBC ? '✓ "Summary of Benefits" (SBC) is absent'  : '✗ "Summary of Benefits" (SBC) is present — should be hidden on public UI');
+                findings.push(!hasEOC ? '✓ "Evidence of Coverage" (EOC) is absent' : '✗ "Evidence of Coverage" (EOC) is present — should be hidden on public UI');
+
+                pushSetupStep(setupSteps, {
+                  id: panelStepId,
+                  name: `Verify Category filter shows SOB only [${pass.label}]`,
+                  expected: 'Category filter accordion should contain "Schedule of Benefits" only. "Summary of Benefits" (SBC) and "Evidence of Coverage" (EOC) must NOT be available on the public UI.',
+                  actual: errMsg
+                    ? `Failed to inspect Category filter: ${errMsg}`
+                    : `Category options detected:\n${optList}\n\nFindings:\n${findings.join('\n')}`,
+                  status: passStatus ? 'PASS' : 'FAIL',
+                  durationMs: Date.now() - t0,
+                  screenshotPath: shot,
+                  screenshotLabel: `Category filter [${pass.label}]`,
+                });
+                expect(passStatus,
+                  `[${pass.label}] Category filter must expose SOB only. hasSOB=${hasSOB}, hasSBC=${hasSBC}, hasEOC=${hasEOC}.`
+                ).toBeTruthy();
+              });
+
+              // ── Apply filters (Audience=Marketplace, Category=Schedule of Benefits) ──
+              const search = scope.search;
+              const filterStepId = stepId++;
+              await base.step(`Step ${filterStepId} — Apply filters [${pass.label}] (Audience="${search.audience}", Category="${search.category}")`, async () => {
+                const t0 = Date.now();
+                let ok = true, errMsg = '';
+                const actions = [];
+                try {
+                  await marketplace.scrollToAllFormsAndDocuments();
+                  if (search.audience) {
+                    await marketplace.selectFilterOption('Audience', search.audience);
+                    actions.push(`checked Audience="${search.audience}"`);
+                  }
+                  if (search.category) {
+                    await marketplace.selectFilterOption('Category', search.category);
+                    actions.push(`checked Category="${search.category}"`);
+                  }
+                } catch (err) {
+                  ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                }
+                await marketplace.scrollToAllFormsAndDocuments();
+                const shot = path.join(screenshotsDir, `Step${filterStepId}_Filters_${pass.label}.png`);
+                await marketplace.saveScreenshot(shot, { preserveScroll: true });
+                pushSetupStep(setupSteps, {
+                  id: filterStepId,
+                  name: `Apply filters for [${pass.label}]`,
+                  expected: `Audience "${search.audience}" and Category "${search.category}" filters should be applied for [${pass.label}].`,
+                  actual: ok
+                    ? `Filters ready for [${pass.label}]: ${actions.length ? actions.join('; ') : 'filters already applied'}.`
+                    : `Failed to apply filters for [${pass.label}]: ${errMsg}`,
+                  status: ok ? 'PASS' : 'FAIL',
+                  durationMs: Date.now() - t0,
+                  screenshotPath: shot,
+                  screenshotLabel: `Filters — ${pass.label}`,
+                });
+                if (!ok) throw new Error(`Step ${filterStepId} failed: ${errMsg}`);
+              });
+
+              // ── Search + validate ──
+              const searchStepId = stepId++;
+              let resolvedTargets = [];
+              let allNameCards = [];
+              await base.step(`Step ${searchStepId} — Search "${scope.planName}" [${pass.label}]`, async () => {
+                const t0 = Date.now();
+                await marketplace.searchByPlanName(scope.planName);
+                await marketplace.scrollToAllFormsAndDocuments();
+
+                allNameCards = await marketplace.findResultCardsByName(scope.planName);
+
+                resolvedTargets = [];
+                for (const rawExpected of search.expectedUrls) {
+                  const expectedUrl = absolutizeUrl(rawExpected, scope.appUrl);
+                  const card = await marketplace.findCardByNameAndUrl(scope.planName, expectedUrl);
+                  resolvedTargets.push({ expectedUrl, card });
+                }
+
+                const shot = path.join(screenshotsDir, `Step${searchStepId}_Search_${pass.label}.png`);
+                await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                const matchedCount = resolvedTargets.filter((t) => t.card).length;
+                const enough = allNameCards.length > 0;
+
+                const lineFor = (t, i) => {
+                  const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
+                                 : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
+                                 : `#${i + 1}`;
+                  return t.card
+                    ? `• ${langHint} SOB PDF matched: ${t.card.href}`
+                    : `• ${langHint} SOB PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
+                };
+                const linesJoined = resolvedTargets.map(lineFor).join('\n');
+
+                const actual = enough
+                  ? `Plan "${scope.planName}" is present in the search results.\n`
+                    + `Total cards containing plan name: ${allNameCards.length}\n`
+                    + `Matched SOB PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
+                    + linesJoined
+                  : `Plan "${scope.planName}" is NOT present in the search results.\n`
+                    + `Total cards containing plan name: 0`;
+
+                pushSetupStep(setupSteps, {
+                  id: searchStepId,
+                  name: `Search for plan "${scope.planName}" [${pass.label}]`,
+                  expected: 'Plan should be searchable and its English + Spanish SOB PDFs should be listed in the results.',
+                  actual,
+                  status: enough ? 'PASS' : 'FAIL',
+                  durationMs: Date.now() - t0,
+                  screenshotPath: shot,
+                  screenshotLabel: `Search results [${pass.label}] — ${scope.planName}`,
+                });
+                expect(enough,
+                  `[${pass.label}] No result cards contain the plan name "${scope.planName}". See setup step ${searchStepId} evidence.`
+                ).toBeTruthy();
+              });
+
+              for (let i = 0; i < resolvedTargets.length; i++) {
+                const t = resolvedTargets[i];
+                planCardIndex += 1;
+                await validateOnePlanUrl({
+                  index:       planCardIndex,
+                  expectedUrl: t.expectedUrl,
+                  card:        t.card,
+                  planName:    scope.planName,
+                  labelPrefix: `[${pass.label}] `,
+                  marketplace,
+                  context,
+                  screenshotsDir,
+                  shotPrefix:  shortCode,
+                  planCards,
+                });
               }
             }
           } catch (err) {
@@ -819,16 +747,14 @@ function registerGroup(group) {
 
         const planDurationMs = Date.now() - planStart;
 
-        // ── Write per-plan HTML report + variant.json (always, even on failure) ──
-        const searchLabels = scope.searches
-          .map((s, i) => s.label ? s.label : `Search ${i + 1}`)
-          .join(' + ');
-        const perPlanTestName = `Marketplace Plan Search — ${scope.planName} (${fullStateName} · ${scope.year})`;
+        // ── Write per-plan HTML report + variant.json ──
+        const searchLabels = scope.search.label || 'SOB';
+        const perPlanTestName = `Marketplace SOB Search — ${scope.planName} (${fullStateName} · ${scope.year})`;
         const perPlanTestDescription =
-          `Launch Molina Marketplace , navigate through Member Resources → Forms & Documents, `
-          + `select state "${fullStateName}", toggle to coverage year ${scope.year}, `
-          + `search for plan "${scope.planName}", then validate the plan is opening in new tab `
-          + `for each document type (${searchLabels}).`;
+          `Launch Molina Marketplace, navigate through Member Resources → Forms & Documents, `
+          + `select state "${fullStateName}", toggle to coverage year ${scope.year}, verify the Category `
+          + `filter exposes SOB only (SBC/EOC hidden on public UI), search for plan "${scope.planName}", `
+          + `then validate the English + Spanish SOB PDFs open in a new tab and their URLs are SOB URLs.`;
         const perPlanReportTag = scope.testId || `MP-PLANS-Row${scope.row}`;
 
         try {
@@ -855,8 +781,8 @@ function registerGroup(group) {
           logger.info('REPORT', `[${perPlanReportTag}] Report written: ${reportFile}`);
 
           try {
-            const setupFailed = setupSteps.some(s => s.status === 'FAIL');
-            const cardFailed  = planCards.some(c => c.status === 'FAIL');
+            const setupFailed = setupSteps.some((s) => s.status === 'FAIL');
+            const cardFailed  = planCards.some((c) => c.status === 'FAIL');
             const overallStatus = (setupFailed || cardFailed) ? 'FAIL' : (planCards.length ? 'PASS' : 'FAIL');
             const variantJson = path.join(scopeDir, 'variant.json');
             fs.writeFileSync(variantJson, JSON.stringify({
@@ -871,7 +797,7 @@ function registerGroup(group) {
               durationMs:  planDurationMs,
               testName:    perPlanTestName,
               testDescription: perPlanTestDescription,
-              setupSteps:  setupSteps.map(s => ({
+              setupSteps:  setupSteps.map((s) => ({
                 id:         s.id,
                 name:       s.name,
                 status:     s.status,
@@ -879,7 +805,7 @@ function registerGroup(group) {
                 expected:   (s.expected || '').substring(0, 500),
                 actual:     (s.actual   || '').substring(0, 800),
               })),
-              planCards:   planCards.map(c => ({
+              planCards:   planCards.map((c) => ({
                 id:          c.id,
                 name:        c.name,
                 status:      c.status,
@@ -887,7 +813,7 @@ function registerGroup(group) {
                 pdfUrl:      c.pdfUrl,
                 href:        c.href,
                 error:       c.error,
-                validations: (c.validations || []).map(v => ({
+                validations: (c.validations || []).map((v) => ({
                   name:        v.name,
                   status:      v.status,
                   description: (v.description || '').substring(0, 300),
@@ -903,12 +829,11 @@ function registerGroup(group) {
           logger.warn('REPORT', `[${perPlanReportTag}] Failed to write report: ${repErr.message}`);
         }
 
-        if (planError || planCards.some(c => c.status === 'FAIL')) {
+        if (planError || planCards.some((c) => c.status === 'FAIL')) {
           failedPlans.push(scope.testId || scope.planName);
         }
       }
 
-      // Final assertion — batch fails if shared setup failed or any plan failed.
       if (sharedSetupError) {
         throw new Error(
           `Batch [${state} · ${year}] shared setup failed — ${plans.length} plan(s) not executed: `
@@ -924,7 +849,8 @@ function registerGroup(group) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// validateOnePlanUrl — click one card, verify its PDF URL, build a plan card
+// validateOnePlanUrl — click one card, verify its PDF URL matches the
+// SOB-only rule, build a plan card.
 // ══════════════════════════════════════════════════════════════════════════
 
 async function validateOnePlanUrl({
@@ -946,14 +872,12 @@ async function validateOnePlanUrl({
   };
   planCards.push(card_);
 
-  // Guard: no matching card at this index.
   if (!card) {
     card_.status = 'FAIL';
     card_.error = `No result card at index ${index} for plan "${planName}".`;
     const missShot = path.join(screenshotsDir, `${shotPrefix}_Plan${index}_NotFound.png`);
     await ensureValidScreenshot(
-      () => captureEvidencePanel(context,
-        fallbackPanelHtml(card_.name, card_.error), missShot),
+      () => captureEvidencePanel(context, fallbackPanelHtml(card_.name, card_.error), missShot),
       () => Promise.resolve(missShot),
     );
     pushPlanStep(card_, {
@@ -1024,28 +948,41 @@ async function validateOnePlanUrl({
     });
   });
 
-  // ── Step 2 — Verify the PDF URL against ExpectedUrls[i] ──
-  await base.step(`Plan #${index} — Verify PDF URL against expected`, async () => {
+  // ── Step 2 — Verify the PDF URL is SOB (not SBC / EOC) and filename matches expected ──
+  await base.step(`Plan #${index} — Verify PDF URL is SOB (not SBC/EOC) and filename matches`, async () => {
     const t0 = Date.now();
-    const urlNotEmpty = !!card_.pdfUrl;
-    const urlHasPdf   = /\.pdf(\?|#|$)/i.test(card_.pdfUrl);
-    const urlMatches  = normalizeUrlForCompare(card_.pdfUrl) === normalizeUrlForCompare(expectedUrl);
+    const actualUrl = card_.pdfUrl || '';
+    const actualPath = pathLower(actualUrl);
+    const actualFilename = filenameFromUrl(actualUrl);
+    const expectedFilename = filenameFromUrl(expectedUrl);
+
+    const urlNotEmpty = !!actualUrl;
+    const urlHasPdf   = /\.pdf(\?|#|$)/i.test(actualUrl);
+    const urlHasSOB   = DOC_TYPE_RE.SOB.test(actualPath);
+    const urlHasNoSBC = !DOC_TYPE_RE.SBC.test(actualPath);
+    const urlHasNoEOC = !DOC_TYPE_RE.EOC.test(actualPath);
+    const filenameMatches = !!expectedFilename && actualFilename === expectedFilename;
 
     const urlChecks = [
-      { label: 'PDF URL not empty',       pass: urlNotEmpty, detail: card_.pdfUrl || '(empty)' },
-      { label: 'PDF URL contains ".pdf"', pass: urlHasPdf,   detail: card_.pdfUrl },
+      { label: 'PDF URL not empty',       pass: urlNotEmpty, detail: actualUrl || '(empty)' },
+      { label: 'PDF URL contains ".pdf"', pass: urlHasPdf,   detail: actualUrl },
+      { label: 'PDF URL contains "SOB"',  pass: urlHasSOB,   detail: urlHasSOB ? 'SOB token found in URL path' : 'SOB token NOT found in URL path' },
+      { label: 'PDF URL does NOT contain "SBC"', pass: urlHasNoSBC, detail: urlHasNoSBC ? 'no SBC token in URL' : 'SBC token found — SBC should not be exposed on public UI' },
+      { label: 'PDF URL does NOT contain "EOC"', pass: urlHasNoEOC, detail: urlHasNoEOC ? 'no EOC token in URL' : 'EOC token found — EOC should not be exposed on public UI' },
       {
-        label: 'PDF URL matches expected',
-        pass: urlMatches,
-        detail: urlMatches ? 'exact match (ignoring query/fragment/trailing slash)' : `expected: ${expectedUrl}`,
+        label: 'PDF filename matches expected',
+        pass: filenameMatches,
+        detail: filenameMatches
+          ? `filename="${actualFilename}"`
+          : `expected="${expectedFilename}", actual="${actualFilename}"`,
       },
     ];
-    const urlOverall = urlChecks.every(c => c.pass);
+    const urlOverall = urlChecks.every((c) => c.pass);
 
     const urlShot = path.join(screenshotsDir, `${shotPrefix}_Plan${index}_Step2_VerifyURL.png`);
     const urlRes = await ensureValidScreenshot(
       () => captureEvidencePanel(context,
-        urlValidationPanelHtml(card_.name, card_.pdfUrl, expectedUrl, urlChecks),
+        urlValidationPanelHtml(card_.name, actualUrl, expectedUrl, urlChecks),
         urlShot),
       () => captureEvidencePanel(context,
         fallbackPanelHtml(card_.name, 'Could not render URL validation panel.'),
@@ -1054,34 +991,31 @@ async function validateOnePlanUrl({
 
     pushPlanStep(card_, {
       id: 2,
-      name: 'Verify PDF URL',
-      expected: `PDF URL should match the expected URL.\nExpected: ${expectedUrl}`,
+      name: 'Verify PDF URL is SOB',
+      expected: `PDF URL should be a SOB URL (contain "SOB", not "SBC" or "EOC") and filename should match expected.\nExpected filename: ${expectedFilename}`,
       actual: urlOverall
-        ? `PDF URL matches expected successfully.\nActual: ${card_.pdfUrl || '(empty)'}`
-        : `PDF URL does not match expected.\nActual: ${card_.pdfUrl || '(empty)'}`,
+        ? `PDF URL is a valid SOB URL and filename matches expected.\nActual: ${actualUrl || '(empty)'}`
+        : `PDF URL validation failed.\nActual: ${actualUrl || '(empty)'}`,
       status: urlOverall ? 'PASS' : 'FAIL',
       durationMs: Date.now() - t0,
       screenshotPath: urlRes.filePath,
       screenshotLabel: `URL validation — ${card_.name}`,
     });
     card_.validations.push({
-      name: 'PDF URL matches expected',
+      name: 'PDF URL matches SOB rule',
       status: urlOverall ? 'PASS' : 'FAIL',
-      description: urlOverall ? 'All URL checks passed.' : urlChecks.filter(c => !c.pass).map(c => `${c.label} → ${c.detail}`).join('; '),
+      description: urlOverall
+        ? 'All SOB URL checks passed.'
+        : urlChecks.filter((c) => !c.pass).map((c) => `${c.label} → ${c.detail}`).join('; '),
     });
     if (!urlOverall) card_.status = 'FAIL';
   });
 
-  // Clean up the PDF tab so it doesn't leak into the next card's click.
   if (pdfPage) { await pdfPage.close().catch(() => {}); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
 // PDF page-level screenshot capture — identical logic to drug spec.
-// Chrome's PDF viewer paints outside the DOM so page.screenshot() returns
-// a black rectangle. We try (1) CDP capture with fromSurface:false, (2)
-// plain page.screenshot fallback, then (3) render page 1 ourselves via
-// pdfjs-dist so the report always shows the real PDF cover.
 // ══════════════════════════════════════════════════════════════════════════
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
