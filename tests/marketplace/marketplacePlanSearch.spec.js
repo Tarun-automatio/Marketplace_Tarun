@@ -75,14 +75,44 @@ const {
 const { writeReport } = require('../../reporting/reportGenerator');
 
 // ══════════════════════════════════════════════════════════════════════════
-// Config — all values come from framework.config.js
+// Config — values come from framework.config.js, overridable via the
+// workbook's `Settings` sheet (Key/Value) or an explicit env var.
 // ══════════════════════════════════════════════════════════════════════════
 
 const MPP = frameworkConfig.marketplacePlans;
 
-const APP_URL_DEFAULT = MPP.urls.appUrl;
-const EXCEL_PATH      = MPP.excelPath;
-const EXCEL_SHEET     = MPP.excelSheet;
+const EXCEL_PATH  = MPP.excelPath;
+const EXCEL_SHEET = MPP.excelSheet;
+
+/** Read a Key/Value sheet from the workbook into a plain object. */
+function loadSheetSettings(excelPath, sheetName) {
+  try {
+    if (!excelPath || !fs.existsSync(excelPath)) return {};
+    const wb = XLSX.readFile(excelPath);
+    const sheet = wb.Sheets[sheetName];
+    if (!sheet) return {};
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    const map = {};
+    for (const r of rows) {
+      const k = String(r.Key || r.key || '').trim();
+      if (!k) continue;
+      map[k] = String(r.Value == null ? '' : r.Value).trim();
+    }
+    return map;
+  } catch { return {}; }
+}
+
+// Precedence per key: env var > Settings sheet Value > framework.config.js fallback.
+const SHEET_SETTINGS = loadSheetSettings(EXCEL_PATH, 'Settings');
+const pickSetting = (envName, sheetKey, cfgFallback) => {
+  const envVal = process.env[envName];
+  if (envVal != null && String(envVal).trim() !== '') return String(envVal).trim();
+  const sheetVal = SHEET_SETTINGS[sheetKey];
+  if (sheetVal != null && String(sheetVal).trim() !== '') return String(sheetVal).trim();
+  return cfgFallback;
+};
+
+const APP_URL_DEFAULT = pickSetting('MARKETPLACE_PLANS_URL', 'AppUrl', MPP.urls.appUrl);
 
 const FILTER_STATE = String(MPP.filters.state || '').trim();
 const FILTER_YEAR  = String(MPP.filters.year  || '').trim();
@@ -123,7 +153,8 @@ const DOC_TYPE_RE = {
 const norm = (v) => String(v == null ? '' : v).trim();
 
 function envLabelFromUrl(url) {
-  const u = String(url || '');
+  const u = String(url || '').toLowerCase();
+  if (u.includes('uat-pws')) return 'UAT (uat-pws)';
   if (u.includes('pws-q3')) return 'Q3 (pws-q3)';
   if (u.includes('pws-q2')) return 'Q2 (pws-q2)';
   if (u.includes('pws-q1')) return 'Q1 (pws-q1)';

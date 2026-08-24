@@ -48,6 +48,8 @@ Two flows run per plan, per language (EN + ES):
 
 Disable the negative check for a run with `$env:MARKETPLACE_PLANS_NEGATIVE_SBC='false'`; override the filter copy with `MARKETPLACE_PLANS_SBC_AUDIENCE` / `MARKETPLACE_PLANS_SBC_CATEGORY` if the UI text shifts.
 
+The landing URL is data-driven. Set it on the workbook's `Settings` sheet (`AppUrl`) so switching between Q1 / Q2 / Q3 / UAT / prod is a one-cell edit — no code change required. Precedence: `MARKETPLACE_PLANS_URL` env var → `Settings!AppUrl` → `framework.config.js` default.
+
 "npm run test:marketplace:plans" : Cleans old artifacts and runs the plan-search suite in headless mode
 
 "npm run test:marketplace:plans:headed" : Same run, but with a visible Chrome window
@@ -221,6 +223,8 @@ Each suite is driven by an Excel workbook. Add rows and set `Run=Y` to enable th
       - `Audience` / `Category`: filter checkbox values (e.g. `Member`, `Summary of Benefits`)
       - `PlanName`: text typed into the search box (also used to filter matching cards)
       - `ExpectedUrls`: pipe-separated PDF URLs — one per matching card
+    - **Sheet `Settings`** — global run config (Key / Value / Notes). Change these cells to retarget the suite without editing code.
+      - `AppUrl` — landing URL (e.g. `https://uat-pws.molinahealthcare.com/`, `https://pws-q3.molinahealthcare.com/`). Precedence: `MARKETPLACE_PLANS_URL` env → this Value → `framework.config.js` default.
     - **Sheet `AdditionalSearches`** — optional; extra searches to run AFTER the primary
       - Columns: `TestId, Label, Audience, Category, ExpectedUrls`
       - Each row joins to a `Plans` row via `TestId` (case-insensitive)
