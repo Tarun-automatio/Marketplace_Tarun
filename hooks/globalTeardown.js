@@ -28,6 +28,7 @@ const { generateMarketplaceSummaries }   = require('./marketplaceSummary');
 const { generatePlansDashboard }         = require('./marketplacePlansSummary');
 const { generatePharmacyDashboard }      = require('./marketplacePharmacySummary');
 const { generateSitecoreDocsDashboard }  = require('./marketplaceSitecoreDocsSummary');
+const { generateBrochureFormularyDashboard } = require('./marketplaceBrochureFormularySummary');
 
 module.exports = async function globalTeardown() {
   // ── Marketplace toggle-check consolidated report (per state) ──────────
@@ -95,5 +96,25 @@ module.exports = async function globalTeardown() {
     }
   } catch (err) {
     console.error(`[TEARDOWN] Marketplace Sitecore Docs dashboard failed: ${err && err.message}`);
+  }
+
+  // ── Marketplace Brochure & Formulary dashboard (single file, all states) ──
+  const brochureDir = path.join(process.cwd(), 'reports', 'marketplace-brochure-formulary');
+  try {
+    const { file, count, perState = [], flat = [] } = generateBrochureFormularyDashboard({ rootDir: brochureDir });
+    if (count > 0) {
+      console.log(`[TEARDOWN] Marketplace Brochure & Formulary dashboard written (${count} state${count === 1 ? '' : 's'}):`);
+      console.log(`  \u2022 ${file}`);
+      for (const p of perState) {
+        console.log(`  \u2022 ${p.file}  (${p.count} state${p.count === 1 ? '' : 's'})`);
+      }
+      for (const f of flat) {
+        console.log(`  \u2022 ${f.dir}  (flat share folder \u00b7 ${f.htmlCount} HTML${f.htmlCount === 1 ? '' : 's'} + dashboard)`);
+      }
+    } else {
+      console.log('[TEARDOWN] No marketplace-brochure-formulary variant.json files found \u2014 dashboard skipped.');
+    }
+  } catch (err) {
+    console.error(`[TEARDOWN] Marketplace Brochure & Formulary dashboard failed: ${err && err.message}`);
   }
 };

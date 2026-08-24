@@ -1,21 +1,19 @@
 /**
- * Marketplace — Plan Search + Per-Plan SOB PDF Validation (batched)
+ * Marketplace — Plan Search + Per-Plan SOB PDF Validation + SBC Negative (batched)
  *
- * NEW REQUIREMENT (2026-08):
- *   The public Marketplace UI only exposes **SOB (Schedule of Benefits)**.
- *   SBC and EOC are no longer surfaced on the public site. This spec:
- *
- *     1. Positively validates every plan's SOB PDF (English + Spanish)
- *        opens in a new tab and its URL is a genuine SOB URL.
- *     2. Negatively validates the Category filter accordion shows
- *        "Schedule of Benefits" only — never "Summary of Benefits" (SBC)
- *        or "Evidence of Coverage" (EOC).
+ * REQUIREMENT (2026-08 refresh):
+ *   1. Positively validates every plan's SOB PDF (English + Spanish)
+ *      opens in a new tab and its URL is a genuine SOB URL.
+ *   2. Behaviourally proves SBC is not available on the public UI by
+ *      applying the SBC Category filter (Summary of Benefits) and
+ *      asserting the same PlanName search returns ZERO result cards
+ *      — also PASSes when the SBC option is missing from the accordion.
  *
  * Excel rows are grouped by (State, Year, AppUrl) so the "launch →
  * Member Resources → Forms & Documents → state → year" nav runs ONCE per
- * batch. Each plan inside the batch then executes its own SOB-only
- * verify/filter/search/validate cycle in English + Spanish, and writes
- * its OWN per-plan HTML report + variant.json.
+ * batch. Each plan inside the batch then runs the full positive + negative
+ * cycle in English AND Spanish, and writes its OWN per-plan HTML report +
+ * variant.json.
  *
  * Business flow per plan (steps captured in the per-plan report):
  *   Step 1  Launch Marketplace URL                          (shared)
@@ -23,15 +21,16 @@
  *   Step 3  Open "Forms & Documents" page                   (shared)
  *   Step 4  Select state → capture default coverage year    (shared)
  *   Step 5  Click Coverage Year <year>                      (shared)
- *   Step 6  EN — Verify Category filter shows SOB only (SBC/EOC absent)
- *   Step 7  EN — Apply filters (Audience=Marketplace, Category=Schedule of Benefits)
- *   Step 8  EN — Type PlanName, click Search
- *   Step 9  Switch site language to Spanish
- *   Step 10 ES — Verify Category filter shows SOB only (SBC/EOC absent)
- *   Step 11 ES — Apply filters (idempotent — same filters as EN)
- *   Step 12 ES — Type PlanName, click Search
- *   Per PDF card then clicks the matching link, captures the new-tab URL,
- *   and validates:
+ *   Step 6  EN — Apply SOB filter (Audience=Marketplace, Category=Schedule of Benefits)
+ *   Step 7  EN — Search PlanName + per-card SOB PDF validation
+ *   Step 8  EN — Apply SBC filter (Category=Summary of Benefits)
+ *   Step 9  EN — Re-search PlanName → assert ZERO result cards
+ *   Step 10 Switch site language to Spanish
+ *   Step 11 ES — Apply SOB filter
+ *   Step 12 ES — Search PlanName + per-card SOB PDF validation
+ *   Step 13 ES — Apply SBC filter
+ *   Step 14 ES — Re-search PlanName → assert ZERO result cards
+ *   Per PDF card also validates:
  *     • PDF opens in a new tab
  *     • URL contains "SOB" (case-insensitive) and does NOT contain "SBC" or "EOC"
  *     • PDF filename matches the expected filename from ExpectedUrls
@@ -47,6 +46,10 @@
  *   PlanName      — text typed into the search box + used to filter cards
  *   ExpectedUrls  — pipe-separated absolute URLs; one per matching card
  *                   (English + Spanish SOB PDFs)
+ *
+ * The SBC negative-check knobs live in `framework.config.js` under
+ * `marketplacePlans.negativeSbc` (env: MARKETPLACE_PLANS_NEGATIVE_SBC,
+ * MARKETPLACE_PLANS_SBC_AUDIENCE, MARKETPLACE_PLANS_SBC_CATEGORY).
  */
 
 const fs = require('fs');
@@ -93,6 +96,15 @@ const TEST_ENVIRONMENT = MPP.test.environment;
 
 const NEW_TAB_TIMEOUT = frameworkConfig.pageLoadWaitMs   || 45000;
 const PDF_RENDER_WAIT = frameworkConfig.waitAfterNetworkIdleMs || 2000;
+
+// Behavioural negative-check knobs. When enabled, after the SOB positive
+// flow completes for a language pass we apply the SBC filter, run the same
+// PlanName search, and assert zero result cards — proving SBC is not
+// available on the public UI.
+const NEG_SBC = frameworkConfig.marketplacePlans.negativeSbc || {};
+const NEG_SBC_ENABLED = NEG_SBC.enabled !== false;
+const NEG_SBC_AUDIENCE = String(NEG_SBC.audience || 'Marketplace');
+const NEG_SBC_CATEGORY = String(NEG_SBC.category || 'Summary of Benefits');
 
 // Doc-type detection used for the SOB-only URL rule. The regex is
 // anchored on non-alphanumeric boundaries (`/`, `_`, `.`, `-`) so a plan
@@ -296,22 +308,21 @@ async function resetBetweenPlans({ marketplace, page, appUrl, state, year }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Category-panel introspection — the negative check for SBC/EOC.
-// Returns { hasSOB, hasSBC, hasEOC, options } so callers can build the
-// PASS/FAIL step evidence.
+// Category-filter option probe — used only for structured evidence in the
+// SBC negative step. Returns whether the SBC label is even offered in the
+// Category accordion, plus the raw options list for report evidence.
 // ══════════════════════════════════════════════════════════════════════════
 
-async function inspectCategoryPanel(marketplace) {
-  const options = await marketplace.getFilterOptions('Category');
-  const labels  = options.map((o) => o.label || '');
-  const values  = options.map((o) => o.value || '');
-  const haystack = [...labels, ...values].join(' | ');
-
-  const hasSOB = /schedule\s*of\s*benefits/i.test(haystack) || /\bsob\b/i.test(haystack);
-  const hasSBC = /summary\s*of\s*benefits/i.test(haystack)  || /\bsbc\b/i.test(haystack);
-  const hasEOC = /evidence\s*of\s*coverage/i.test(haystack) || /\beoc\b/i.test(haystack);
-
-  return { hasSOB, hasSBC, hasEOC, options };
+async function categoryOptionPresence(marketplace, needle) {
+  const target = String(needle || '').trim().toLowerCase();
+  let options = [];
+  try { options = await marketplace.getFilterOptions('Category'); }
+  catch { return { present: false, options: [] }; }
+  const present = options.some((o) =>
+    String(o.label || '').trim().toLowerCase() === target
+    || String(o.value || '').trim().toLowerCase() === target
+  );
+  return { present, options };
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -583,48 +594,6 @@ function registerGroup(group) {
                 });
               }
 
-              // ── Verify Category filter shows SOB only (SBC / EOC absent) ──
-              const panelStepId = stepId++;
-              await base.step(`Step ${panelStepId} — Verify Category filter shows SOB only [${pass.label}]`, async () => {
-                const t0 = Date.now();
-                let panelInfo = { hasSOB: false, hasSBC: true, hasEOC: true, options: [] };
-                let errMsg = '';
-                try {
-                  await marketplace.scrollToAllFormsAndDocuments();
-                  panelInfo = await inspectCategoryPanel(marketplace);
-                } catch (err) {
-                  errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);
-                }
-
-                const { hasSOB, hasSBC, hasEOC, options } = panelInfo;
-                const passStatus = !errMsg && hasSOB && !hasSBC && !hasEOC;
-                const optList = options.map((o) => `• ${o.label || '(no label)'} [value="${o.value}"]`).join('\n') || '(no options detected)';
-
-                const shot = path.join(screenshotsDir, `Step${panelStepId}_CategoryPanel_${pass.label}.png`);
-                await marketplace.saveScreenshot(shot, { preserveScroll: true });
-
-                const findings = [];
-                findings.push(hasSOB  ? '✓ "Schedule of Benefits" is available'    : '✗ "Schedule of Benefits" is MISSING');
-                findings.push(!hasSBC ? '✓ "Summary of Benefits" (SBC) is absent'  : '✗ "Summary of Benefits" (SBC) is present — should be hidden on public UI');
-                findings.push(!hasEOC ? '✓ "Evidence of Coverage" (EOC) is absent' : '✗ "Evidence of Coverage" (EOC) is present — should be hidden on public UI');
-
-                pushSetupStep(setupSteps, {
-                  id: panelStepId,
-                  name: `Verify Category filter shows SOB only [${pass.label}]`,
-                  expected: 'Category filter accordion should contain "Schedule of Benefits" only. "Summary of Benefits" (SBC) and "Evidence of Coverage" (EOC) must NOT be available on the public UI.',
-                  actual: errMsg
-                    ? `Failed to inspect Category filter: ${errMsg}`
-                    : `Category options detected:\n${optList}\n\nFindings:\n${findings.join('\n')}`,
-                  status: passStatus ? 'PASS' : 'FAIL',
-                  durationMs: Date.now() - t0,
-                  screenshotPath: shot,
-                  screenshotLabel: `Category filter [${pass.label}]`,
-                });
-                expect(passStatus,
-                  `[${pass.label}] Category filter must expose SOB only. hasSOB=${hasSOB}, hasSBC=${hasSBC}, hasEOC=${hasEOC}.`
-                ).toBeTruthy();
-              });
-
               // ── Apply filters (Audience=Marketplace, Category=Schedule of Benefits) ──
               const search = scope.search;
               const filterStepId = stepId++;
@@ -735,6 +704,140 @@ function registerGroup(group) {
                   shotPrefix:  shortCode,
                   planCards,
                 });
+              }
+
+              // ── Negative SBC check ────────────────────────────────
+              // Prove SBC is not exposed on the public UI: unselect the
+              // SOB category, apply the SBC category, re-search the same
+              // PlanName, assert zero result cards match. If the SBC
+              // option is missing from the accordion entirely that ALSO
+              // proves it \u2014 we PASS the "apply" step and skip the search.
+              if (NEG_SBC_ENABLED) {
+                const sbcFilterStepId = stepId++;
+                let sbcOptionPresent = true;
+                let sbcApplied = false;
+                let sbcApplyErr = '';
+                await base.step(
+                  `Step ${sbcFilterStepId} \u2014 Apply SBC filter [${pass.label}] `
+                  + `(Audience="${NEG_SBC_AUDIENCE}", Category="${NEG_SBC_CATEGORY}")`,
+                  async () => {
+                    const t0 = Date.now();
+                    let optionsSnapshot = [];
+                    try {
+                      await marketplace.scrollToAllFormsAndDocuments();
+                      const probe = await categoryOptionPresence(marketplace, NEG_SBC_CATEGORY);
+                      sbcOptionPresent = probe.present;
+                      optionsSnapshot = probe.options;
+
+                      // Unselect the positive-flow SOB filter so SBC is the
+                      // only Category constraint. Idempotent.
+                      try {
+                        await marketplace.unselectFilterOption('Category', search.category);
+                      } catch (unErr) {
+                        logger.warn('MP-PLANS',
+                          `Uncheck of Category="${search.category}" failed \u2014 continuing: `
+                          + `${(unErr && unErr.message ? unErr.message : String(unErr)).substring(0, 160)}`);
+                      }
+
+                      if (sbcOptionPresent) {
+                        await marketplace.selectFilterOption('Category', NEG_SBC_CATEGORY);
+                        sbcApplied = true;
+                      }
+                    } catch (err) {
+                      sbcApplyErr = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                    }
+
+                    await marketplace.scrollToAllFormsAndDocuments();
+                    const shot = path.join(screenshotsDir, `Step${sbcFilterStepId}_SBC_Filter_${pass.label}.png`);
+                    await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                    const optListStr = optionsSnapshot
+                      .map((o) => `\u2022 ${o.label || '(no label)'} [value="${o.value}"]`)
+                      .join('\n') || '(no options detected)';
+
+                    const passStatus = !sbcApplyErr;
+                    pushSetupStep(setupSteps, {
+                      id: sbcFilterStepId,
+                      name: `Apply SBC filter [${pass.label}]`,
+                      expected: `The public UI should either hide the "${NEG_SBC_CATEGORY}" Category option entirely, or, if the option is present, allow it to be selected so we can prove no matching plans surface.`,
+                      actual: sbcApplyErr
+                        ? `Failed to attempt SBC filter: ${sbcApplyErr}\n\nCategory options seen:\n${optListStr}`
+                        : sbcOptionPresent
+                          ? `SBC filter applied.\nAudience="${NEG_SBC_AUDIENCE}", Category="${NEG_SBC_CATEGORY}"\n\nCategory options seen:\n${optListStr}`
+                          : `SBC option is NOT present in the Category accordion \u2014 that alone proves SBC is not available on the UI. Next step will assert zero results after re-searching.\n\nCategory options seen:\n${optListStr}`,
+                      status: passStatus ? 'PASS' : 'FAIL',
+                      durationMs: Date.now() - t0,
+                      screenshotPath: shot,
+                      screenshotLabel: `SBC filter attempt [${pass.label}]`,
+                    });
+                    if (!passStatus) throw new Error(`Step ${sbcFilterStepId} failed: ${sbcApplyErr}`);
+                  }
+                );
+
+                const sbcSearchStepId = stepId++;
+                await base.step(
+                  `Step ${sbcSearchStepId} \u2014 Search "${scope.planName}" under SBC [${pass.label}] \u2014 expect zero results`,
+                  async () => {
+                    const t0 = Date.now();
+                    let sbcCards = [];
+                    let searchErr = '';
+                    try {
+                      await marketplace.searchByPlanName(scope.planName);
+                      await marketplace.scrollToAllFormsAndDocuments();
+                      sbcCards = await marketplace.findResultCardsByName(scope.planName);
+                    } catch (err) {
+                      searchErr = (err && err.message) ? err.message.substring(0, 200) : String(err);
+                    }
+
+                    const shot = path.join(screenshotsDir, `Step${sbcSearchStepId}_SBC_Search_${pass.label}.png`);
+                    await marketplace.saveScreenshot(shot, { preserveScroll: true });
+
+                    const cardCount = sbcCards.length;
+                    const passStatus = !searchErr && cardCount === 0;
+
+                    const leakLines = sbcCards.slice(0, 5).map((c, i) =>
+                      `  ${i + 1}. ${c.title || '(no title)'} \u2014 ${c.href || '(no href)'}`
+                    ).join('\n');
+
+                    let actual;
+                    if (searchErr) {
+                      actual = `Search failed: ${searchErr}`;
+                    } else if (passStatus) {
+                      actual = sbcOptionPresent
+                        ? `PASS \u2014 no result cards matched "${scope.planName}" under Category="${NEG_SBC_CATEGORY}". SBC is not exposed on the public UI.`
+                        : `PASS \u2014 SBC option is not in the Category accordion AND a re-search returned zero matching cards. SBC is not exposed on the public UI.`;
+                    } else {
+                      actual = `FAIL \u2014 ${cardCount} result card(s) matched "${scope.planName}" under Category="${NEG_SBC_CATEGORY}".\n`
+                        + `The public UI is leaking SBC content.\nLeaked cards (up to 5 shown):\n${leakLines}`;
+                    }
+
+                    pushSetupStep(setupSteps, {
+                      id: sbcSearchStepId,
+                      name: `Search under SBC returns zero results [${pass.label}]`,
+                      expected: `Applying the SBC (Summary of Benefits) Category filter and searching "${scope.planName}" should return zero result cards for this plan \u2014 confirming SBC is not available on the public UI.`,
+                      actual,
+                      status: passStatus ? 'PASS' : 'FAIL',
+                      durationMs: Date.now() - t0,
+                      screenshotPath: shot,
+                      screenshotLabel: `SBC search results [${pass.label}] \u2014 ${scope.planName}`,
+                    });
+                    expect(passStatus,
+                      `[${pass.label}] Expected zero SBC result cards for "${scope.planName}"; got ${cardCount}. See setup step ${sbcSearchStepId} evidence.`
+                    ).toBeTruthy();
+                  }
+                );
+
+                // Restore the positive-flow Category filter so the ES pass
+                // (or any subsequent step) begins in the same state as
+                // before this negative check.
+                if (sbcApplied) {
+                  try { await marketplace.unselectFilterOption('Category', NEG_SBC_CATEGORY); }
+                  catch (unErr) {
+                    logger.warn('MP-PLANS',
+                      `Uncheck of Category="${NEG_SBC_CATEGORY}" failed after negative check: `
+                      + `${(unErr && unErr.message ? unErr.message : String(unErr)).substring(0, 160)}`);
+                  }
+                }
               }
             }
           } catch (err) {

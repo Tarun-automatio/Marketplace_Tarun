@@ -23,10 +23,11 @@ const path = require('path');
 
 // Map spec-path fragment → report folder that suite writes to.
 const SUITE_REPORTS = [
-  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i,      dir: 'reports/marketplace-plans' },
-  { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,     dir: 'reports/marketplace-pharmacy' },
-  { match: /tests[\\/]marketplace[\\/]marketplaceSitecoreDocs\.spec\.js/i,     dir: 'reports/marketplace-sitecore-docs' },
-  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,                 dir: 'reports/marketplace-toggleCheck' },
+  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearch\.spec\.js/i,       dir: 'reports/marketplace-plans' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,      dir: 'reports/marketplace-pharmacy' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceSitecoreDocs\.spec\.js/i,      dir: 'reports/marketplace-sitecore-docs' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceBrochureFormulary\.spec\.js/i, dir: 'reports/marketplace-brochure-formulary' },
+  { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,                  dir: 'reports/marketplace-toggleCheck' },
 ];
 
 // Always cleaned — Playwright's own artifact folders.

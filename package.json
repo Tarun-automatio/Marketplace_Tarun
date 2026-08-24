@@ -16,8 +16,12 @@
     "test:marketplace:pharmacy:headed": "playwright test tests/marketplace/marketplaceDrugPharmacy.spec.js --workers=1 --headed",
     "test:marketplace:docs": "playwright test tests/marketplace/marketplaceSitecoreDocs.spec.js",
     "test:marketplace:docs:headed": "playwright test tests/marketplace/marketplaceSitecoreDocs.spec.js --workers=1 --headed",
+    "test:marketplace:brochure": "playwright test tests/marketplace/marketplaceBrochureFormulary.spec.js",
+    "test:marketplace:brochure:headed": "playwright test tests/marketplace/marketplaceBrochureFormulary.spec.js --workers=1 --headed",
     "data:sitecore-docs": "node scripts/createSitecoreDocsExcel.js",
+    "data:brochure-formulary": "node scripts/createBrochureFormularyExcel.js",
     "report:regen:docs": "node scripts/regenSitecoreDocsReports.js",
+    "report:regen:brochure": "node scripts/regenBrochureFormularyReports.js",
     "test:all": "playwright test",
     "report:open": "start reports/marketplace-toggleCheck/"
   },

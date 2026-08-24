@@ -256,6 +256,15 @@ const config = {
       author:      env('MARKETPLACE_PLANS_TEST_AUTHOR', 'Molina QA Automation'),
       environment: env('MARKETPLACE_PLANS_TEST_ENVIRONMENT', ''),
     },
+    // Behavioural negative-check: after the SOB positive flow, apply the
+    // SBC (Summary of Benefits) filter and search the same PlanName. If any
+    // result cards match, SBC has leaked onto the public UI \u2014 fail.
+    // Set MARKETPLACE_PLANS_NEGATIVE_SBC=false to skip these steps.
+    negativeSbc: {
+      enabled:  env('MARKETPLACE_PLANS_NEGATIVE_SBC',          true),
+      audience: env('MARKETPLACE_PLANS_SBC_AUDIENCE',          'Marketplace'),
+      category: env('MARKETPLACE_PLANS_SBC_CATEGORY',          'Summary of Benefits'),
+    },
     report: {
       dir: path.join(process.cwd(), env('MARKETPLACE_PLANS_REPORT_DIR', 'reports/marketplace-plans')),
     },
@@ -374,6 +383,75 @@ const config = {
     report: {
       dir: path.join(process.cwd(),
                      env('MARKETPLACE_SITECORE_DOCS_REPORT_DIR', 'reports/marketplace-sitecore-docs')),
+    },
+  },
+
+  // ── Marketplace Brochure & Formulary suite (Requirement 2b) ────────────
+  // Per state on the Forms & Documents page:
+  //   1. Apply filter (Audience=Marketplace, Category=Formulary and Drug List)
+  //      → search + verify Formulary PDF card(s) (EN, plus ES if present)
+  //   2. Uncheck previous Category, apply Category=Member Handbooks and Coverage
+  //      → search + verify Member Brochure PDF cards (EN + ES)
+  //   3. Direct URL hit for Broker Brochure PDFs (they don't surface via the
+  //      Marketplace filters — Display column says "Broker Page")
+  //   4. Repeat 1-2 under Spanish site language
+  //
+  // Sheet columns (one row per state):
+  //   Run | TestId | State | Year
+  //   Formulary_Search       | Formulary_EN_Name    | Formulary_ES_Name    | Formulary_EN_URL    | Formulary_ES_URL
+  //   MemberBrochure_Search  | MemberBrochure_EN_Name | MemberBrochure_ES_Name | MemberBrochure_EN_URL | MemberBrochure_ES_URL
+  //   BrokerBrochure_EN_Name | BrokerBrochure_ES_Name | BrokerBrochure_EN_URL | BrokerBrochure_ES_URL
+  //   VanityFormulary | Notes
+  marketplaceBrochureFormulary: {
+    urls: {
+      appUrl: env('MARKETPLACE_BROCHURE_FORMULARY_URL', 'https://uat-pws.molinahealthcare.com/'),
+    },
+    excelPath:  env('MARKETPLACE_BROCHURE_FORMULARY_EXCEL',
+                    path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceBrochureFormularyData.xlsx')),
+    excelSheet: env('MARKETPLACE_BROCHURE_FORMULARY_SHEET', 'BrochureFormulary'),
+
+    // Filter values for the two per-language filter passes. Overridable
+    // if the UI copy shifts (Molina occasionally renames these labels).
+    filters: {
+      audience:         env('MARKETPLACE_BROCHURE_FORMULARY_AUDIENCE',        'Marketplace'),
+      formularyCategory: env('MARKETPLACE_BROCHURE_FORMULARY_CATEGORY_FORM',  'Formulary and Drug Lists'),
+      brochureCategory:  env('MARKETPLACE_BROCHURE_FORMULARY_CATEGORY_BROCH', 'Member Handbooks and Coverage'),
+    },
+
+    // Optional matrix filters — narrow the run without editing the sheet.
+    matrixFilters: {
+      state: env('MARKETPLACE_BROCHURE_FORMULARY_STATE', ''),  // e.g. 'CA' or 'TX-OX'
+      year:  env('MARKETPLACE_BROCHURE_FORMULARY_YEAR',  ''),
+    },
+
+    // Host rewrite — same trick as the Sitecore docs suite. Sheet URLs
+    // come in production form; tests target UAT by default.
+    hostRewrite: {
+      source: String(env('MARKETPLACE_BROCHURE_FORMULARY_SOURCE_HOST', 'www.molinahealthcare.com')).toLowerCase(),
+      target: String(env('MARKETPLACE_BROCHURE_FORMULARY_TARGET_HOST', 'uat-pws.molinahealthcare.com')).toLowerCase(),
+    },
+
+    // Language passes — comma-separated 2-letter codes. Default is EN + ES.
+    languages: String(env('MARKETPLACE_BROCHURE_FORMULARY_LANGS', 'en,es'))
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Whether to verify the Broker Brochure URLs by direct navigation
+    // (they're not surfaced via any Marketplace filter, so we can't
+    // find them via the search flow).
+    brokerBrochure: {
+      enabled:         env('MARKETPLACE_BROCHURE_FORMULARY_BROKER_ENABLED', true),
+      embedTimeoutMs:  env('MARKETPLACE_SITECORE_DOCS_EMBED_TIMEOUT_MS',   5000),
+    },
+
+    test: {
+      id:          env('MARKETPLACE_BROCHURE_FORMULARY_TEST_ID',     'MP-BROCH-FORM-001'),
+      module:      env('MARKETPLACE_BROCHURE_FORMULARY_TEST_MODULE', 'Marketplace / Brochure & Formulary'),
+      author:      env('MARKETPLACE_BROCHURE_FORMULARY_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('MARKETPLACE_BROCHURE_FORMULARY_TEST_ENVIRONMENT', ''),
+    },
+    report: {
+      dir: path.join(process.cwd(),
+                     env('MARKETPLACE_BROCHURE_FORMULARY_REPORT_DIR', 'reports/marketplace-brochure-formulary')),
     },
   },
 };
