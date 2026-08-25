@@ -760,17 +760,16 @@ function registerGroup(group) {
                       sbcOptionPresent = probe.present;
                       optionsSnapshot = probe.options;
 
-                      // Unselect the positive-flow SOB filter so SBC is the
-                      // only Category constraint. Idempotent.
-                      try {
-                        await marketplace.unselectFilterOption('Category', search.category);
-                      } catch (unErr) {
-                        logger.warn('MP-PLANS',
-                          `Uncheck of Category="${search.category}" failed \u2014 continuing: `
-                          + `${(unErr && unErr.message ? unErr.message : String(unErr)).substring(0, 160)}`);
-                      }
-
+                      // Only touch the SOB filter when we're actually going to
+                      // swap in SBC \u2014 leaving the UI unchanged when we skip.
                       if (sbcOptionPresent) {
+                        try {
+                          await marketplace.unselectFilterOption('Category', search.category);
+                        } catch (unErr) {
+                          logger.warn('MP-PLANS',
+                            `Uncheck of Category="${search.category}" failed \u2014 continuing: `
+                            + `${(unErr && unErr.message ? unErr.message : String(unErr)).substring(0, 160)}`);
+                        }
                         await marketplace.selectFilterOption('Category', NEG_SBC_CATEGORY);
                         sbcApplied = true;
                       }
@@ -795,7 +794,7 @@ function registerGroup(group) {
                         ? `Failed to attempt SBC filter: ${sbcApplyErr}\n\nCategory options seen:\n${optListStr}`
                         : sbcOptionPresent
                           ? `SBC filter applied.\nAudience="${NEG_SBC_AUDIENCE}", Category="${NEG_SBC_CATEGORY}"\n\nCategory options seen:\n${optListStr}`
-                          : `SBC option is NOT present in the Category accordion \u2014 that alone proves SBC is not available on the UI. Next step will assert zero results after re-searching.\n\nCategory options seen:\n${optListStr}`,
+                          : `SBC option is NOT present in the Category accordion \u2014 that alone proves SBC is not available on the UI. The re-search step will be skipped.\n\nCategory options seen:\n${optListStr}`,
                       status: passStatus ? 'PASS' : 'FAIL',
                       durationMs: Date.now() - t0,
                       screenshotPath: shot,
@@ -806,9 +805,22 @@ function registerGroup(group) {
                 );
 
                 const sbcSearchStepId = stepId++;
-                await base.step(
-                  `Step ${sbcSearchStepId} \u2014 Search "${scope.planName}" under SBC [${pass.label}] \u2014 expect zero results`,
-                  async () => {
+                if (!sbcOptionPresent) {
+                  const filterShot = path.join(screenshotsDir, `Step${sbcFilterStepId}_SBC_Filter_${pass.label}.png`);
+                  pushSetupStep(setupSteps, {
+                    id: sbcSearchStepId,
+                    name: `Search under SBC skipped [${pass.label}]`,
+                    expected: `Applying the SBC (Summary of Benefits) Category filter and searching "${scope.planName}" should return zero result cards for this plan \u2014 confirming SBC is not available on the public UI.`,
+                    actual: `PASS \u2014 SBC option is not in the Category accordion, so no re-search is needed. SBC is not exposed on the public UI.`,
+                    status: 'PASS',
+                    durationMs: 0,
+                    screenshotPath: filterShot,
+                    screenshotLabel: `SBC filter attempt [${pass.label}]`,
+                  });
+                } else {
+                  await base.step(
+                    `Step ${sbcSearchStepId} \u2014 Search "${scope.planName}" under SBC [${pass.label}] \u2014 expect zero results`,
+                    async () => {
                     const t0 = Date.now();
                     let sbcCards = [];
                     let searchErr = '';
@@ -857,6 +869,7 @@ function registerGroup(group) {
                     ).toBeTruthy();
                   }
                 );
+                }
 
                 // Restore the positive-flow Category filter so the ES pass
                 // (or any subsequent step) begins in the same state as

@@ -17,7 +17,9 @@ Five suites:
 ## Setup (one-time)
 
 ```powershell
-cd marketplace
+cd 
+
+marketplace
 
 "npm install" : to download the dependency (ignore "" to run in terminal)
 npm test
@@ -148,16 +150,16 @@ All three steps run under **both EN and ES** site languages. Each PDF card is la
 
 App URL, filter labels, host swap, languages, and Broker-enabled flag live in a **`Settings` sheet** inside `MarketplaceBrochureFormularyData.xlsx` (Key / Value / Notes). Edit those cells to point the suite at Q1 / Q3 / UAT / prod or to track a UI copy change — no code change required.
 
-| Key                 | Purpose                                        | UAT default                                   |
-| ------------------- | ---------------------------------------------- | --------------------------------------------- |
-| `AppUrl`            | Landing page                                   | `https://uat-pws.molinahealthcare.com/`       |
-| `Audience`          | Audience filter checkbox                       | `Marketplace`                                 |
-| `FormularyCategory` | Category filter for the Formulary pass         | `Formulary and Drug Lists`                    |
-| `BrochureCategory`  | Category filter for the Member + Broker pass   | `Member Handbooks and Coverage`               |
-| `SourceHost`        | Host inside the sheet's PDF URLs (prod form)   | `www.molinahealthcare.com`                    |
-| `TargetHost`        | Host to rewrite to at test time                | `uat-pws.molinahealthcare.com`                |
-| `Languages`         | Comma-separated site-language passes           | `en,es`                                       |
-| `BrokerEnabled`     | `false` skips the Broker Brochure step         | `true`                                        |
+| Key                   | Purpose                                      | UAT default                               |
+| --------------------- | -------------------------------------------- | ----------------------------------------- |
+| `AppUrl`            | Landing page                                 | `https://uat-pws.molinahealthcare.com/` |
+| `Audience`          | Audience filter checkbox                     | `Marketplace`                           |
+| `FormularyCategory` | Category filter for the Formulary pass       | `Formulary and Drug Lists`              |
+| `BrochureCategory`  | Category filter for the Member + Broker pass | `Member Handbooks and Coverage`         |
+| `SourceHost`        | Host inside the sheet's PDF URLs (prod form) | `www.molinahealthcare.com`              |
+| `TargetHost`        | Host to rewrite to at test time              | `uat-pws.molinahealthcare.com`          |
+| `Languages`         | Comma-separated site-language passes         | `en,es`                                 |
+| `BrokerEnabled`     | `false` skips the Broker Brochure step     | `true`                                  |
 
 Resolution order for each key: **explicit env var** (for CI one-off overrides) → **Settings sheet** → **hardcoded fallback in `config/framework.config.js`**.
 
@@ -242,7 +244,7 @@ Each suite is driven by an Excel workbook. Add rows and set `Run=Y` to enable th
       - `*_Search`: text typed into the plan search box; usually the PDF filename stem (e.g. `CAFormulary27`)
       - Any doc-type a state doesn't publish leaves its `*_Name` / `*_URL` cells empty and is skipped automatically (e.g. TX-OX has no Formulary)
       - Sheet URLs are stored in **production form**; the `SourceHost` → `TargetHost` swap in the Settings sheet rewrites them at test time
-    - **Sheet `Settings`** — global run config (see the [Brochure & Formulary section](#run-commands--marketplace-brochure--formulary-requirement-2b) for the key table)
+    - **Sheet `Settings`** — global run config (see the [Brochure &amp; Formulary section](#run-commands--marketplace-brochure--formulary-requirement-2b) for the key table)
     - Regenerate the workbook from the seed configs with `npm run data:brochure-formulary` (edit the `STATE_CONFIGS` and `SETTINGS` arrays at the top of [scripts/createBrochureFormularyExcel.js](scripts/createBrochureFormularyExcel.js))
   - Marketplace Sitecore Docs → `data/marketplace/MarketplaceSitecoreDocsData.xlsx`  (sheet `SitecoreDocs`)
     - Columns (one row per plan): `Run, TestId, State, RateCode, PlanCode, PlanName, SBC_Display, SBC_EN_Name, SBC_ES_Name, SBC_EN_URL, SBC_ES_URL, SOB_Display, SOB_EN_Name, SOB_ES_Name, SOB_EN_URL, SOB_ES_URL, EOC_Display, EOC_EN_Name, EOC_ES_Name, EOC_EN_URL, EOC_ES_URL, OOC_Display, OOC_EN_Name, OOC_ES_Name, OOC_EN_URL, OOC_ES_URL, Notes`
