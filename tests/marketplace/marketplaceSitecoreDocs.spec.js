@@ -17,6 +17,10 @@
  * × 2 languages). See data/marketplace/MarketplaceSitecoreDocsData.xlsx.
  * Rows are FLATTENED at load time into one test scope per URL.
  *
+ * Per-row `TargetHost` column overrides the env var / config default for
+ * that row only. Precedence: row cell > MARKETPLACE_SITECORE_DOCS_TARGET_HOST
+ * env var > hostRewrite.target config default.
+ *
  * Emits `variant.json` next to each per-scope report so
  * `hooks/marketplaceSitecoreDocsSummary.js` can build a consolidated
  * dashboard at run's end.
@@ -54,6 +58,11 @@ const F_PLAN        = String(CFG.filters.plan     || '').toLowerCase();
 
 const HOST_SRC      = String(CFG.hostRewrite.source || '').toLowerCase();
 const HOST_DST      = String(CFG.hostRewrite.target || '').toLowerCase();
+// Explicit env-var override for target host. When set (non-empty), it wins
+// over every row's `TargetHost` cell. Distinct from HOST_DST because HOST_DST
+// falls back to the config default; this is empty when the user hasn't
+// exported the variable at all.
+const HOST_DST_ENV  = String(process.env.MARKETPLACE_SITECORE_DOCS_TARGET_HOST || '').trim().toLowerCase();
 
 const EMBED_TIMEOUT = CFG.pdf.embedTimeoutMs;
 const RENDER_WAIT   = CFG.pdf.renderWaitMs;
@@ -91,18 +100,33 @@ const STATE_CODE_TO_NAME = {
 };
 const fullStateName = (code) => STATE_CODE_TO_NAME[String(code || '').toUpperCase()] || String(code || '').toUpperCase();
 
-/** Rewrite an absolute URL's hostname when it matches `HOST_SRC`. */
-function rewriteHost(rawUrl) {
-  const s = String(rawUrl || '').trim();
-  if (!s || !HOST_SRC || !HOST_DST || HOST_SRC === HOST_DST) return s;
+/** Rewrite an absolute URL's hostname when it matches `HOST_SRC`.
+ *  `targetHost` is the destination hostname for this specific URL and lets
+ *  each row target its own environment via the sheet's `TargetHost` column.
+ */
+function rewriteHost(rawUrl, targetHost) {
+  const s   = String(rawUrl || '').trim();
+  const dst = String(targetHost || '').trim().toLowerCase();
+  if (!s || !HOST_SRC || !dst || HOST_SRC === dst) return s;
   try {
     const u = new URL(s);
     if (u.hostname.toLowerCase() === HOST_SRC) {
-      u.hostname = HOST_DST;
+      u.hostname = dst;
       return u.toString();
     }
     return s;
   } catch { return s; }
+}
+
+/** Resolve the effective target host for a row:
+ *    row's `TargetHost` cell > env var override > config default (HOST_DST).
+ *  A non-empty cell always wins so the sheet stays the source of truth.
+ */
+function resolveTargetHost(rowTargetHost) {
+  const cell = String(rowTargetHost || '').trim().toLowerCase();
+  if (cell) return cell;
+  if (HOST_DST_ENV) return HOST_DST_ENV;
+  return HOST_DST;
 }
 
 /** Filename from URL path (e.g. `ID27SBCE_G1_1.pdf`). */
@@ -152,6 +176,8 @@ function loadTestMatrix() {
     const rateCode = norm(r.RateCode);
     const testIdBase = norm(r.TestId) || `Row${i + 2}`;
     const notes    = norm(r.Notes);
+    const rowTargetHost = norm(r.TargetHost);
+    const effectiveTargetHost = resolveTargetHost(rowTargetHost);
     if (!state || !planName) return;
 
     for (const docType of DOC_TYPES) {
@@ -165,7 +191,7 @@ function loadTestMatrix() {
 
         const expectedName = norm(r[`${docType}_${langKey}_Name`])
                            || filenameFromUrl(rawUrl);
-        const url = rewriteHost(rawUrl);
+        const url = rewriteHost(rawUrl, effectiveTargetHost);
 
         scopes.push({
           row:            i + 2,
@@ -205,8 +231,18 @@ function loadTestMatrix() {
   const byState = new Map();
   for (const s of filtered) byState.set(s.state, (byState.get(s.state) || 0) + 1);
   const stateSummary = [...byState.entries()].map(([k, v]) => `${k}(${v})`).join(', ');
+
+  const byHost = new Map();
+  for (const s of filtered) {
+    let h = '(unresolved)';
+    try { h = new URL(s.url).hostname.toLowerCase(); } catch { /* keep default */ }
+    byHost.set(h, (byHost.get(h) || 0) + 1);
+  }
+  const hostSummary = [...byHost.entries()].map(([k, v]) => `${k}(${v})`).join(', ');
+
   logger.info('MP-DOCS',
     `Loaded ${filtered.length} scope(s) from ${path.basename(EXCEL_PATH)}  ·  states: ${stateSummary}  ·  types: ${DOC_TYPES.join('/')}  ·  langs: ${LANGUAGES.join('/')}`);
+  logger.info('MP-DOCS', `Target hosts (row cell wins): ${hostSummary}`);
   return filtered;
 }
 

@@ -102,12 +102,16 @@ Unset the variables (`Remove-Item Env:MARKETPLACE_SITECORE_DOCS_STATE`) to widen
 
 ### Environment host swap
 
-Excel URLs come from the SharePoint tracker in production form (`www.molinahealthcare.com`). The spec rewrites the host to the target QA env at load time:
+Excel URLs come from the SharePoint tracker in production form (`www.molinahealthcare.com`). The spec rewrites the host to the target QA env at load time. Per URL, the effective target is resolved in this order:
+
+1. **Row `TargetHost` cell** — per-row override on the `SitecoreDocs` sheet (column `TargetHost`). Populate this to send specific rows to a different env (e.g. WA rows → `uat-pws.molinahealthcare.com`) while leaving the rest on the default.
+2. **`MARKETPLACE_SITECORE_DOCS_TARGET_HOST` env var** — applies to every row whose cell is blank.
+3. **Config default** — `pws-q3.molinahealthcare.com`.
 
 - `MARKETPLACE_SITECORE_DOCS_SOURCE_HOST` — defaults to `www.molinahealthcare.com`
 - `MARKETPLACE_SITECORE_DOCS_TARGET_HOST` — defaults to `pws-q3.molinahealthcare.com`
 
-Point at Q1/Q2/prod without editing the workbook by overriding `MARKETPLACE_SITECORE_DOCS_TARGET_HOST`.
+Point every row at Q1/Q2/prod without editing the workbook by overriding `MARKETPLACE_SITECORE_DOCS_TARGET_HOST` (and leaving the `TargetHost` column empty).
 
 ### Reports & sharing
 

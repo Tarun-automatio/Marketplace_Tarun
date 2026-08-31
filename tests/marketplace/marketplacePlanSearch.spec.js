@@ -2,8 +2,11 @@
  * Marketplace — Plan Search + Per-Plan SOB PDF Validation + SBC Negative (batched)
  *
  * REQUIREMENT (2026-08 refresh):
- *   1. Positively validates every plan's SOB PDF (English + Spanish)
- *      opens in a new tab and its URL is a genuine SOB URL.
+ *   1. Positively validates every plan's SOB PDF per site language:
+ *      the English pass validates the English SOB PDF only, and the
+ *      Spanish pass validates the Spanish SOB PDF only. (Spanish PDFs
+ *      only surface after the site language is switched to Spanish, and
+ *      vice versa.)
  *   2. Behaviourally proves SBC is not available on the public UI by
  *      applying the SBC Category filter (Summary of Benefits) and
  *      asserting the same PlanName search returns ZERO result cards
@@ -22,12 +25,12 @@
  *   Step 4  Select state → capture default coverage year    (shared)
  *   Step 5  Click Coverage Year <year>                      (shared)
  *   Step 6  EN — Apply SOB filter (Audience=Marketplace, Category=Schedule of Benefits)
- *   Step 7  EN — Search PlanName + per-card SOB PDF validation
+ *   Step 7  EN — Search PlanName + validate ENGLISH SOB PDF card
  *   Step 8  EN — Apply SBC filter (Category=Summary of Benefits)
  *   Step 9  EN — Re-search PlanName → assert ZERO result cards
  *   Step 10 Switch site language to Spanish
  *   Step 11 ES — Apply SOB filter
- *   Step 12 ES — Search PlanName + per-card SOB PDF validation
+ *   Step 12 ES — Search PlanName + validate SPANISH SOB PDF card
  *   Step 13 ES — Apply SBC filter
  *   Step 14 ES — Re-search PlanName → assert ZERO result cards
  *   Per PDF card also validates:
@@ -54,6 +57,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const XLSX = require('xlsx');
 const { test: base, expect } = require('@playwright/test');
 
@@ -167,6 +171,15 @@ function sanitizeForFs(s) {
     .replace(/[()]/g, '')
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_');
+}
+
+// Keep folder / file names within Windows MAX_PATH; append a short hash
+// suffix when we clip so two long TestIds that share a prefix stay distinct.
+function limitFsName(s, maxLen = 60) {
+  const clean = String(s || '');
+  if (clean.length <= maxLen) return clean;
+  const hash = crypto.createHash('sha1').update(clean).digest('hex').slice(0, 6);
+  return clean.slice(0, Math.max(1, maxLen - 7)).replace(/[_-]+$/, '') + '_' + hash;
 }
 
 /** Absolutize a bare `/path` against the app URL's origin. */
@@ -559,7 +572,7 @@ function registerGroup(group) {
       for (let planIdx = 0; planIdx < plans.length; planIdx++) {
         const scope = plans[planIdx];
         const isFirst = planIdx === 0;
-        const testIdSlug     = scope.testId ? sanitizeForFs(scope.testId) : `Row${scope.row}`;
+        const testIdSlug     = limitFsName(scope.testId ? sanitizeForFs(scope.testId) : `Row${scope.row}`);
         const shortCode      = scope.testId ? scope.testId.split(/\s+/)[0] : `Row${scope.row}`;
         const scopeDir       = path.join(REPORT_DIR, testIdSlug);
         const screenshotsDir = path.join(scopeDir, 'screenshots');
@@ -664,7 +677,22 @@ function registerGroup(group) {
               });
 
               // ── Search + validate ──
+              // Per-language filter: EN pass validates only English SOB
+              // PDFs; ES pass validates only Spanish SOB PDFs. Spanish PDFs
+              // only surface once the site language is switched to Spanish
+              // (and vice versa), so cross-language expectations no longer
+              // apply. Detection uses the `/english/` or `/spanish/` path
+              // segment in ExpectedUrls; rows with neither segment fall
+              // through to every pass so legacy data still runs.
               const searchStepId = stepId++;
+              const passLangName = pass.code === 'es' ? 'Spanish' : 'English';
+              const langOfUrl = (u) => /\/english\//i.test(u) ? 'en'
+                                    : /\/spanish\//i.test(u) ? 'es'
+                                    : null;
+              const expectedForPass = search.expectedUrls.filter((u) => {
+                const lang = langOfUrl(u);
+                return lang == null || lang === pass.code;
+              });
               let resolvedTargets = [];
               let allNameCards = [];
               await base.step(`Step ${searchStepId} — Search "${scope.planName}" [${pass.label}]`, async () => {
@@ -675,7 +703,7 @@ function registerGroup(group) {
                 allNameCards = await marketplace.findResultCardsByName(scope.planName);
 
                 resolvedTargets = [];
-                for (const rawExpected of search.expectedUrls) {
+                for (const rawExpected of expectedForPass) {
                   const expectedUrl = absolutizeUrl(rawExpected, scope.appUrl);
                   const card = await marketplace.findCardByNameAndUrl(scope.planName, expectedUrl);
                   resolvedTargets.push({ expectedUrl, card });
@@ -685,7 +713,9 @@ function registerGroup(group) {
                 await marketplace.saveScreenshot(shot, { preserveScroll: true });
 
                 const matchedCount = resolvedTargets.filter((t) => t.card).length;
-                const enough = allNameCards.length > 0;
+                const enough = allNameCards.length > 0
+                            && resolvedTargets.length > 0
+                            && matchedCount === resolvedTargets.length;
 
                 const lineFor = (t, i) => {
                   const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
@@ -697,18 +727,23 @@ function registerGroup(group) {
                 };
                 const linesJoined = resolvedTargets.map(lineFor).join('\n');
 
-                const actual = enough
-                  ? `Plan "${scope.planName}" is present in the search results.\n`
-                    + `Total cards containing plan name: ${allNameCards.length}\n`
-                    + `Matched SOB PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
-                    + linesJoined
-                  : `Plan "${scope.planName}" is NOT present in the search results.\n`
-                    + `Total cards containing plan name: 0`;
+                let actual;
+                if (allNameCards.length === 0) {
+                  actual = `Plan "${scope.planName}" is NOT present in the search results.\n`
+                         + `Total cards containing plan name: 0`;
+                } else if (resolvedTargets.length === 0) {
+                  actual = `No ${passLangName} SOB PDF was configured for this plan in ExpectedUrls — nothing to validate for the [${pass.label}] pass.`;
+                } else {
+                  actual = `Plan "${scope.planName}" is present in the search results.\n`
+                         + `Total cards containing plan name: ${allNameCards.length}\n`
+                         + `Matched ${passLangName} SOB PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
+                         + linesJoined;
+                }
 
                 pushSetupStep(setupSteps, {
                   id: searchStepId,
                   name: `Search for plan "${scope.planName}" [${pass.label}]`,
-                  expected: 'Plan should be searchable and its English + Spanish SOB PDFs should be listed in the results.',
+                  expected: `Plan should be searchable and its ${passLangName} SOB PDF should be listed in the [${pass.label}] results.`,
                   actual,
                   status: enough ? 'PASS' : 'FAIL',
                   durationMs: Date.now() - t0,
@@ -716,7 +751,7 @@ function registerGroup(group) {
                   screenshotLabel: `Search results [${pass.label}] — ${scope.planName}`,
                 });
                 expect(enough,
-                  `[${pass.label}] No result cards contain the plan name "${scope.planName}". See setup step ${searchStepId} evidence.`
+                  `[${pass.label}] ${passLangName} SOB PDF for "${scope.planName}" was not fully validated. See setup step ${searchStepId} evidence.`
                 ).toBeTruthy();
               });
 
@@ -901,7 +936,8 @@ function registerGroup(group) {
           `Launch Molina Marketplace, navigate through Member Resources → Forms & Documents, `
           + `select state "${fullStateName}", toggle to coverage year ${scope.year}, verify the Category `
           + `filter exposes SOB only (SBC/EOC hidden on public UI), search for plan "${scope.planName}", `
-          + `then validate the English + Spanish SOB PDFs open in a new tab and their URLs are SOB URLs.`;
+          + `then validate the English SOB PDF (English pass) and the Spanish SOB PDF (Spanish pass) `
+          + `open in a new tab and their URLs are SOB URLs.`;
         const perPlanReportTag = scope.testId || `MP-PLANS-Row${scope.row}`;
 
         try {

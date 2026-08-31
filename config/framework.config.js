@@ -322,8 +322,14 @@ const config = {
   //
   // The tester Excel comes straight from the SharePoint plan list (which
   // uses prod host www.molinahealthcare.com). At load time the spec
-  // rewrites the host to `hostRewrite.target` so tests hit the same env
-  // as every other marketplace suite (Q3 by default).
+  // rewrites the host on every URL. The effective target host per row is
+  // resolved with this precedence:
+  //   1) the row's `TargetHost` cell (per-row override — sheet stays
+  //      the source of truth; one sheet can target multiple envs
+  //      simultaneously, e.g. WA rows on UAT while TX rows stay on Q3)
+  //   2) env var MARKETPLACE_SITECORE_DOCS_TARGET_HOST (global override
+  //      for rows with a blank cell)
+  //   3) hostRewrite.target below (config default — Q3)
   //
   // Sheet columns (wide, one row per plan, 4 doc-types × 2 languages):
   //   Run | TestId | State | RateCode | PlanCode | PlanName
@@ -331,7 +337,7 @@ const config = {
   //   SOB_Display | SOB_EN_Name | SOB_ES_Name | SOB_EN_URL | SOB_ES_URL
   //   EOC_Display | EOC_EN_Name | EOC_ES_Name | EOC_EN_URL | EOC_ES_URL
   //   OOC_Display | OOC_EN_Name | OOC_ES_Name | OOC_EN_URL | OOC_ES_URL
-  //   Notes
+  //   Notes | TargetHost
   marketplaceSitecoreDocs: {
     excelPath:  env('MARKETPLACE_SITECORE_DOCS_EXCEL',
                     path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceSitecoreDocsData.xlsx')),
@@ -355,7 +361,9 @@ const config = {
 
     // Host rewrite — Excel URLs come from SharePoint (prod host); tests
     // run against Q3 by default. Both source + target are matched against
-    // the URL's hostname (case-insensitive).
+    // the URL's hostname (case-insensitive). Row-level `TargetHost` beats
+    // the env var MARKETPLACE_SITECORE_DOCS_TARGET_HOST, which beats the
+    // default below.
     hostRewrite: {
       source: String(env('MARKETPLACE_SITECORE_DOCS_SOURCE_HOST', 'www.molinahealthcare.com'))
         .toLowerCase(),
