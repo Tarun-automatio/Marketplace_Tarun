@@ -1,15 +1,12 @@
 /**
- * Marketplace Brochure & Formulary — consolidated dashboards.
+ * Marketplace Brochure & Formulary — consolidated dashboard.
  *
  * Scans `reports/marketplace-brochure-formulary/` for per-state folders
  * with a `variant.json` companion and produces:
- *   • Consolidated.html            — every state, filterable table
- *   • Consolidated-<STATE>.html    — per-state file (one per state that ran)
- *   • all-reports-<STATE>/         — flat share folder (all HTMLs + a
- *                                    flat-link dashboard) for easy upload
- *
- * The flat folder pattern mirrors the Sitecore Docs suite so QA has a
- * single, familiar workflow across all four marketplace suites.
+ *   • Consolidated.html   — every state, filterable table (root)
+ *   • all-reports/        — flat share folder containing every state's
+ *                           self-contained HTML plus a flat-link
+ *                           Consolidated.html for easy upload/share
  */
 
 const fs   = require('fs');
@@ -384,52 +381,51 @@ function renderDashboardHtml(scopes, opts = {}) {
 
 /**
  * Discover all variant.json files and write:
- *   • Consolidated.html            (all states)
- *   • Consolidated-<STATE>.html    (per state)
- *   • all-reports-<STATE>/         (flat share folder)
- * Returns { file, count, perState, flat }.
+ *   • Consolidated.html   (root — all states, links into per-scope folders)
+ *   • all-reports/        (flat share folder — every state's HTML + a
+ *                          flat-link Consolidated.html)
+ * Also removes stale per-state artifacts from earlier runs
+ * (Consolidated-<STATE>.html, all-reports-<STATE>/).
+ * Returns { file, count, flat }.
  */
 function generateBrochureFormularyDashboard({ rootDir }) {
   const scopes = discoverScopes(rootDir);
   fs.mkdirSync(rootDir, { recursive: true });
 
+  cleanupStalePerStateArtifacts(rootDir);
+
   const allFile = path.join(rootDir, 'Consolidated.html');
   fs.writeFileSync(allFile, renderDashboardHtml(scopes), 'utf8');
 
-  const byState = new Map();
-  for (const s of scopes) {
-    const st = String(s.data.state || '').toUpperCase();
-    if (!st) continue;
-    if (!byState.has(st)) byState.set(st, []);
-    byState.get(st).push(s);
+  let flat = null;
+  try {
+    flat = copyAllReportsToFlatFolder({ rootDir, scopes });
+  } catch (err) {
+    console.error(`[TEARDOWN][MP-BF] Flat folder failed: ${err && err.message}`);
   }
 
-  const perState = [];
-  const flat = [];
-  for (const [st, list] of byState) {
-    const file = path.join(rootDir, `Consolidated-${st}.html`);
-    fs.writeFileSync(file, renderDashboardHtml(list), 'utf8');
-    perState.push({ state: st, file, count: list.length });
-
-    try {
-      const { flatDir, htmlCount } = copyReportsToFlatFolder({ rootDir, state: st, scopes: list });
-      flat.push({ state: st, dir: flatDir, htmlCount });
-    } catch (err) {
-      console.error(`[TEARDOWN][MP-BF] Flat folder for ${st} failed: ${err && err.message}`);
-    }
-  }
-
-  return { file: allFile, count: scopes.length, perState, flat };
+  return { file: allFile, count: scopes.length, flat };
 }
 
-/** Copy each state's self-contained HTML into a flat folder + a flat-link dashboard. */
-function copyReportsToFlatFolder({ rootDir, state, scopes }) {
-  const safeState = String(state).replace(/[\\/:*?"<>|]/g, '-');
-  const flatDir = path.join(rootDir, `all-reports-${safeState}`);
+/** Remove per-state Consolidated-<STATE>.html and all-reports-<STATE>/ from previous runs. */
+function cleanupStalePerStateArtifacts(rootDir) {
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const full = path.join(rootDir, entry.name);
+    if (entry.isFile() && /^Consolidated-.+\.html$/i.test(entry.name)) {
+      fs.rmSync(full, { force: true });
+    } else if (entry.isDirectory() && /^all-reports-.+$/i.test(entry.name)) {
+      fs.rmSync(full, { recursive: true, force: true });
+    }
+  }
+}
+
+/** Copy every state's self-contained HTML into a single flat folder + a flat-link dashboard. */
+function copyAllReportsToFlatFolder({ rootDir, scopes }) {
+  const flatDir = path.join(rootDir, 'all-reports');
   fs.mkdirSync(flatDir, { recursive: true });
 
   for (const entry of fs.readdirSync(flatDir)) {
-    fs.rmSync(path.join(flatDir, entry), { force: true });
+    fs.rmSync(path.join(flatDir, entry), { recursive: true, force: true });
   }
 
   let htmlCount = 0;
@@ -443,10 +439,10 @@ function copyReportsToFlatFolder({ rootDir, state, scopes }) {
     htmlCount += 1;
   }
 
-  const dashboardFile = path.join(flatDir, `Consolidated-${safeState}.html`);
+  const dashboardFile = path.join(flatDir, 'Consolidated.html');
   fs.writeFileSync(dashboardFile, renderDashboardHtml(scopes, { flatLinks: true }), 'utf8');
 
-  return { flatDir, htmlCount };
+  return { dir: flatDir, htmlCount };
 }
 
 module.exports = { generateBrochureFormularyDashboard };

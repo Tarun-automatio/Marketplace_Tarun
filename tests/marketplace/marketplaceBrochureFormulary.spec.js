@@ -517,7 +517,9 @@ function registerScope(scope) {
 
       // ══ Per-language pass — Formulary + Member Brochure ══════════
       let cardIndex = 0;
+      let runError = null;
       if (!sharedSetupError) {
+        try {
         for (let passIdx = 0; passIdx < LANGUAGES.length; passIdx++) {
           const langCode  = LANGUAGES[passIdx];
           const langLabel = langCode === 'es' ? 'ES' : 'EN';
@@ -557,8 +559,17 @@ function registerScope(scope) {
             });
           }
 
+          // Per-language pass filtering: EN pass only validates cards
+          // whose PDF href lives under /english/, ES pass only /spanish/.
+          // Items with no lang tag (legacy rows) fall through to every pass.
+          const passLangHint = langCode === 'es' ? 'Spanish' : 'English';
+          const forThisPass = (it) => !it.lang || it.lang === langCode;
+          const formularyItemsForPass      = scope.formulary.items.filter(forThisPass);
+          const memberBrochureItemsForPass = scope.memberBrochure.items.filter(forThisPass);
+          const brokerBrochureItemsForPass = scope.brokerBrochure.items.filter(forThisPass);
+
           // ── Formulary flow ──────────────────────────────────
-          if (scope.formulary.items.length) {
+          if (formularyItemsForPass.length) {
             const filterId = stepId++;
             await runFilterStep({
               stepId: filterId,
@@ -578,7 +589,7 @@ function registerScope(scope) {
               docTypeLabel: 'Formulary',
               docTypeToken: 'FORMULARY',
               searchText: scope.formulary.search || 'Formulary',
-              items: scope.formulary.items,
+              items: formularyItemsForPass,
               scope, marketplace, context,
               screenshotsDir, setupSteps, planCards,
               langLabel, startCardIndex: cardIndex,
@@ -587,23 +598,23 @@ function registerScope(scope) {
             const skipId = stepId++;
             pushSetupStep(setupSteps, {
               id: skipId,
-              name: `Formulary [${langLabel}] — skipped (no expected URLs for this state)`,
-              expected: 'A Formulary URL was expected in the data sheet.',
-              actual: 'No Formulary URLs configured — skipping this doc-type for this state.',
+              name: `Formulary [${langLabel}] — skipped (no ${passLangHint} URL configured)`,
+              expected: `A ${passLangHint} Formulary URL was expected in the data sheet for this pass.`,
+              actual: `No ${passLangHint} Formulary URLs configured — skipping this doc-type for the [${langLabel}] pass.`,
               status: 'INFO',
               durationMs: 0,
             });
           }
 
           // ── Member Brochure flow (uncheck Formulary Category first) ─
-          if (scope.memberBrochure.items.length) {
+          if (memberBrochureItemsForPass.length) {
             const filterId = stepId++;
             await runFilterStep({
               stepId: filterId,
               name: `Apply Member Brochure filter [${langLabel}]`,
               audience: FILTER_AUDIENCE,
               category: FILTER_CAT_BROCHURE,
-              previousCategory: scope.formulary.items.length ? FILTER_CAT_FORMULARY : null,
+              previousCategory: formularyItemsForPass.length ? FILTER_CAT_FORMULARY : null,
               marketplace,
               screenshotsDir,
               setupSteps,
@@ -616,7 +627,7 @@ function registerScope(scope) {
               docTypeLabel: 'Member Brochure',
               docTypeToken: 'BROCHURE',
               searchText: scope.memberBrochure.search || 'Brochure',
-              items: scope.memberBrochure.items,
+              items: memberBrochureItemsForPass,
               scope, marketplace, context,
               screenshotsDir, setupSteps, planCards,
               langLabel, startCardIndex: cardIndex,
@@ -625,17 +636,27 @@ function registerScope(scope) {
             // Broker Brochure shares the same filter — just re-search
             // with the broker filename stem while the Member Handbooks
             // and Coverage filter stays applied.
-            if (BROKER_ENABLED && scope.brokerBrochure.items.length) {
+            if (BROKER_ENABLED && brokerBrochureItemsForPass.length) {
               const brokerSearchId = stepId++;
               cardIndex = await runSearchAndValidate({
                 stepId: brokerSearchId,
                 docTypeLabel: 'Broker Brochure',
                 docTypeToken: 'BROCHURE',
                 searchText: scope.brokerBrochure.search || 'Brochure',
-                items: scope.brokerBrochure.items,
+                items: brokerBrochureItemsForPass,
                 scope, marketplace, context,
                 screenshotsDir, setupSteps, planCards,
                 langLabel, startCardIndex: cardIndex,
+              });
+            } else if (BROKER_ENABLED && scope.brokerBrochure.items.length && !brokerBrochureItemsForPass.length) {
+              const skipId = stepId++;
+              pushSetupStep(setupSteps, {
+                id: skipId,
+                name: `Broker Brochure [${langLabel}] — skipped (no ${passLangHint} URL configured)`,
+                expected: `A ${passLangHint} Broker Brochure URL was expected in the data sheet for this pass.`,
+                actual: `No ${passLangHint} Broker Brochure URLs configured — skipping this doc-type for the [${langLabel}] pass.`,
+                status: 'INFO',
+                durationMs: 0,
               });
             }
 
@@ -650,13 +671,21 @@ function registerScope(scope) {
             const skipId = stepId++;
             pushSetupStep(setupSteps, {
               id: skipId,
-              name: `Member Brochure [${langLabel}] — skipped (no expected URLs for this state)`,
-              expected: 'A Member Brochure URL was expected in the data sheet.',
-              actual: 'No Member Brochure URLs configured — skipping this doc-type for this state.',
+              name: `Member Brochure [${langLabel}] — skipped (no ${passLangHint} URL configured)`,
+              expected: `A ${passLangHint} Member Brochure URL was expected in the data sheet for this pass.`,
+              actual: `No ${passLangHint} Member Brochure URLs configured — skipping this doc-type for the [${langLabel}] pass.`,
               status: 'INFO',
               durationMs: 0,
             });
           }
+        }
+        } catch (err) {
+          // Capture so the per-state HTML report + variant.json still get
+          // written; we re-throw below so Playwright still marks the test failed.
+          runError = err;
+          logger.warn('MP-BF',
+            `Per-language flow failed for [${state} · ${year}]: `
+            + `${(err && err.message ? err.message : String(err)).substring(0, 200)}`);
         }
       }
 
@@ -729,6 +758,9 @@ function registerScope(scope) {
 
       // Re-throw shared setup failure so Playwright marks the test failed.
       if (sharedSetupError) throw sharedSetupError;
+      // Re-throw the per-language flow error (report + variant.json are
+      // already on disk so QA can see exactly which step blew up).
+      if (runError) throw runError;
 
       const failed = planCards.filter((c) => c.status === 'FAIL');
       if (failed.length) {
@@ -755,6 +787,17 @@ async function runFilterStep({
     const actions = [];
     try {
       await marketplace.scrollToAllFormsAndDocuments();
+      // Always clear the search box first — leftover text (from a previous
+      // pass's last doc-type search) narrows the results pane, which trims
+      // the Category accordion so the option we want may not be in the DOM.
+      try {
+        await marketplace.searchByPlanName('');
+        actions.push('cleared search box');
+      } catch (err) {
+        logger.warn('MP-BF',
+          `Clear search failed — continuing: `
+          + `${(err && err.message ? err.message : String(err)).substring(0, 160)}`);
+      }
       if (previousCategory) {
         try {
           await marketplace.unselectFilterOption('Category', previousCategory);
@@ -762,18 +805,6 @@ async function runFilterStep({
         } catch (err) {
           logger.warn('MP-BF',
             `Uncheck of Category="${previousCategory}" failed — continuing: `
-            + `${(err && err.message ? err.message : String(err)).substring(0, 160)}`);
-        }
-        // Clear the search box too — otherwise the previous doc-type's
-        // search leaves the results filtered, which trims the Category
-        // options list on the page so the NEW category we're about to
-        // check may not even be in the DOM.
-        try {
-          await marketplace.searchByPlanName('');
-          actions.push('cleared search box');
-        } catch (err) {
-          logger.warn('MP-BF',
-            `Clear search failed — continuing: `
             + `${(err && err.message ? err.message : String(err)).substring(0, 160)}`);
         }
         await marketplace.scrollToAllFormsAndDocuments();

@@ -7,6 +7,10 @@
  *      Spanish pass validates the Spanish SOB PDF only. (Spanish PDFs
  *      only surface after the site language is switched to Spanish, and
  *      vice versa.)
+ *   1a. Cross-language leak guard: the EN pass must NOT surface any
+ *      Spanish SOB PDFs, and the ES pass must NOT surface any English
+ *      SOB PDFs. Clean passes add nothing to the report; a leak pushes a
+ *      dedicated FAIL step and aborts the pass.
  *   2. Behaviourally proves SBC is not available on the public UI by
  *      applying the SBC Category filter (Summary of Benefits) and
  *      asserting the same PlanName search returns ZERO result cards
@@ -276,7 +280,9 @@ function loadTestMatrix() {
       source:   'excel',
     };
   })
-  .filter((s) => s.state && s.planName && s.search.expectedUrls.length > 0)
+  // ExpectedUrls MAY be empty — that means "no SOB is expected for this plan
+  // in this state" and the search step will prove absence instead of matching.
+  .filter((s) => s.state && s.planName)
   .filter((s) => !FILTER_STATE || s.state === FILTER_STATE.toUpperCase())
   .filter((s) => !FILTER_YEAR  || s.year  === FILTER_YEAR)
   .filter((s) => !FILTER_PLAN  || s.planName.toLowerCase().includes(FILTER_PLAN));
@@ -409,7 +415,9 @@ function registerGroup(group) {
     ? (plans[0].testId || `Marketplace SOB Search — ${state} · ${year} · ${plans[0].planName}`)
     : `Marketplace SOB Search Batch — ${fullStateName} · ${year} (${plans.length} plans)`;
   const groupTestTitle = isSinglePlan
-    ? `${plans[0].planName} — verify ${plans[0].search.expectedUrls.length} SOB PDF URL(s)`
+    ? (plans[0].search.expectedUrls.length > 0
+        ? `${plans[0].planName} — verify ${plans[0].search.expectedUrls.length} SOB PDF URL(s)`
+        : `${plans[0].planName} — prove no SOB PDF is exposed on the UI`)
     : `Batch — verify SOB PDFs for ${plans.length} plans in ${fullStateName} ${year}`;
 
   base.describe(groupDescribeTitle, () => {
@@ -586,6 +594,10 @@ function registerGroup(group) {
 
         await base.step(`Plan ${planIdx + 1}/${plans.length} — ${scope.planName}`, async () => {
           if (sharedSetupError) { planError = sharedSetupError; return; }
+          // Blank ExpectedUrls in Excel = no SOB PDF is published for this
+          // plan in this state → the search step will prove absence instead
+          // of positively validating cards.
+          const expectSob = scope.search.expectedUrls.length > 0;
           try {
             if (!isFirst) {
               await resetBetweenPlans({ marketplace, page, appUrl, state, year });
@@ -712,38 +724,58 @@ function registerGroup(group) {
                 const shot = path.join(screenshotsDir, `Step${searchStepId}_Search_${pass.label}.png`);
                 await marketplace.saveScreenshot(shot, { preserveScroll: true });
 
-                const matchedCount = resolvedTargets.filter((t) => t.card).length;
-                const enough = allNameCards.length > 0
-                            && resolvedTargets.length > 0
-                            && matchedCount === resolvedTargets.length;
-
-                const lineFor = (t, i) => {
-                  const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
-                                 : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
-                                 : `#${i + 1}`;
-                  return t.card
-                    ? `• ${langHint} SOB PDF matched: ${t.card.href}`
-                    : `• ${langHint} SOB PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
-                };
-                const linesJoined = resolvedTargets.map(lineFor).join('\n');
-
+                let stepName;
+                let expected;
                 let actual;
-                if (allNameCards.length === 0) {
-                  actual = `Plan "${scope.planName}" is NOT present in the search results.\n`
-                         + `Total cards containing plan name: 0`;
-                } else if (resolvedTargets.length === 0) {
-                  actual = `No ${passLangName} SOB PDF was configured for this plan in ExpectedUrls — nothing to validate for the [${pass.label}] pass.`;
+                let enough;
+
+                if (!expectSob) {
+                  enough = allNameCards.length === 0;
+                  stepName = `Search for plan "${scope.planName}" under SOB [${pass.label}] — expect zero results`;
+                  expected = `No SOB PDF is expected for "${scope.planName}" in ${fullStateName} · ${scope.year}. Searching under Category="${search.category}" should return zero result cards, proving SOB is not exposed on the UI for this plan.`;
+                  if (enough) {
+                    actual = `PASS — no result cards matched "${scope.planName}" under Category="${search.category}". SOB is not exposed on the UI for this plan.`;
+                  } else {
+                    const leakLines = allNameCards.slice(0, 5).map((c, i) =>
+                      `  ${i + 1}. ${c.title || '(no title)'} — ${c.href || '(no href)'}`
+                    ).join('\n');
+                    actual = `FAIL — ${allNameCards.length} result card(s) matched "${scope.planName}" under Category="${search.category}" but no SOB URL was configured for this plan.\nSurfaced cards (up to 5 shown):\n${leakLines}`;
+                  }
                 } else {
-                  actual = `Plan "${scope.planName}" is present in the search results.\n`
-                         + `Total cards containing plan name: ${allNameCards.length}\n`
-                         + `Matched ${passLangName} SOB PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
-                         + linesJoined;
+                  const matchedCount = resolvedTargets.filter((t) => t.card).length;
+                  enough = allNameCards.length > 0
+                        && resolvedTargets.length > 0
+                        && matchedCount === resolvedTargets.length;
+                  stepName = `Search for plan "${scope.planName}" [${pass.label}]`;
+                  expected = `Plan should be searchable and its ${passLangName} SOB PDF should be listed in the [${pass.label}] results.`;
+
+                  const lineFor = (t, i) => {
+                    const langHint = /\/english\//i.test(t.expectedUrl) ? 'English'
+                                   : /\/spanish\//i.test(t.expectedUrl) ? 'Spanish'
+                                   : `#${i + 1}`;
+                    return t.card
+                      ? `• ${langHint} SOB PDF matched: ${t.card.href}`
+                      : `• ${langHint} SOB PDF NOT FOUND. Expected href-path: ${t.expectedUrl}`;
+                  };
+                  const linesJoined = resolvedTargets.map(lineFor).join('\n');
+
+                  if (allNameCards.length === 0) {
+                    actual = `Plan "${scope.planName}" is NOT present in the search results.\n`
+                           + `Total cards containing plan name: 0`;
+                  } else if (resolvedTargets.length === 0) {
+                    actual = `No ${passLangName} SOB PDF was configured for this plan in ExpectedUrls — nothing to validate for the [${pass.label}] pass.`;
+                  } else {
+                    actual = `Plan "${scope.planName}" is present in the search results.\n`
+                           + `Total cards containing plan name: ${allNameCards.length}\n`
+                           + `Matched ${passLangName} SOB PDF link(s): ${matchedCount}/${resolvedTargets.length}\n`
+                           + linesJoined;
+                  }
                 }
 
                 pushSetupStep(setupSteps, {
                   id: searchStepId,
-                  name: `Search for plan "${scope.planName}" [${pass.label}]`,
-                  expected: `Plan should be searchable and its ${passLangName} SOB PDF should be listed in the [${pass.label}] results.`,
+                  name: stepName,
+                  expected,
                   actual,
                   status: enough ? 'PASS' : 'FAIL',
                   durationMs: Date.now() - t0,
@@ -751,7 +783,9 @@ function registerGroup(group) {
                   screenshotLabel: `Search results [${pass.label}] — ${scope.planName}`,
                 });
                 expect(enough,
-                  `[${pass.label}] ${passLangName} SOB PDF for "${scope.planName}" was not fully validated. See setup step ${searchStepId} evidence.`
+                  expectSob
+                    ? `[${pass.label}] ${passLangName} SOB PDF for "${scope.planName}" was not fully validated. See setup step ${searchStepId} evidence.`
+                    : `[${pass.label}] Expected zero SOB result cards for "${scope.planName}" (no SOB configured); got ${allNameCards.length}. See setup step ${searchStepId} evidence.`
                 ).toBeTruthy();
               });
 
@@ -764,12 +798,48 @@ function registerGroup(group) {
                   card:        t.card,
                   planName:    scope.planName,
                   labelPrefix: `[${pass.label}] `,
+                  docType:     String(scope.search.label || 'SOB').toUpperCase(),
+                  year:        scope.year,
+                  passCode:    pass.code,
+                  appUrl:      scope.appUrl,
                   marketplace,
                   context,
                   screenshotsDir,
                   shotPrefix:  shortCode,
                   planCards,
                 });
+              }
+
+              // Cross-language leak check: fail if an opposite-language SOB
+              // PDF surfaces under the current pass. Clean runs add nothing
+              // to the report; a leak pushes a FAIL step and aborts the pass.
+              // Skipped when no SOB is expected — the search step already
+              // asserted zero cards, so there's nothing to leak.
+              if (expectSob) {
+                const oppositeCode = pass.code === 'en' ? 'es' : 'en';
+                const oppositeLangName = oppositeCode === 'es' ? 'Spanish' : 'English';
+                const oppositeSegRe = oppositeCode === 'es' ? /\/spanish\//i : /\/english\//i;
+                const leakedCards = allNameCards.filter((c) => oppositeSegRe.test(String(c.href || '')));
+                if (leakedCards.length > 0) {
+                  const leakStepId = stepId++;
+                  const searchShot = path.join(screenshotsDir, `Step${searchStepId}_Search_${pass.label}.png`);
+                  const leakLines = leakedCards.slice(0, 5).map((c, i) =>
+                    `  ${i + 1}. ${c.title || '(no title)'} \u2014 ${c.href || '(no href)'}`
+                  ).join('\n');
+                  pushSetupStep(setupSteps, {
+                    id: leakStepId,
+                    name: `${oppositeLangName} PDF leak in [${pass.label}] results`,
+                    expected: `The [${pass.label}] pass should NOT surface any ${oppositeLangName} SOB PDFs for plan "${scope.planName}".`,
+                    actual: `FAIL \u2014 ${leakedCards.length} ${oppositeLangName} SOB PDF card(s) surfaced under the [${pass.label}] pass:\n${leakLines}`,
+                    status: 'FAIL',
+                    durationMs: 0,
+                    screenshotPath: searchShot,
+                    screenshotLabel: `${oppositeLangName} leak [${pass.label}] \u2014 ${scope.planName}`,
+                  });
+                  throw new Error(
+                    `[${pass.label}] ${leakedCards.length} ${oppositeLangName} SOB PDF card(s) leaked into results for "${scope.planName}".`
+                  );
+                }
               }
 
               // ── Negative SBC check ────────────────────────────────
@@ -932,12 +1002,17 @@ function registerGroup(group) {
         // ── Write per-plan HTML report + variant.json ──
         const searchLabels = scope.search.label || 'SOB';
         const perPlanTestName = `Marketplace SOB Search — ${scope.planName} (${fullStateName} · ${scope.year})`;
-        const perPlanTestDescription =
-          `Launch Molina Marketplace, navigate through Member Resources → Forms & Documents, `
-          + `select state "${fullStateName}", toggle to coverage year ${scope.year}, verify the Category `
-          + `filter exposes SOB only (SBC/EOC hidden on public UI), search for plan "${scope.planName}", `
-          + `then validate the English SOB PDF (English pass) and the Spanish SOB PDF (Spanish pass) `
-          + `open in a new tab and their URLs are SOB URLs.`;
+        const perPlanTestDescription = (scope.search.expectedUrls.length > 0)
+          ? `Launch Molina Marketplace, navigate through Member Resources → Forms & Documents, `
+            + `select state "${fullStateName}", toggle to coverage year ${scope.year}, verify the Category `
+            + `filter exposes SOB only (SBC/EOC hidden on public UI), search for plan "${scope.planName}", `
+            + `then validate the English SOB PDF (English pass) and the Spanish SOB PDF (Spanish pass) `
+            + `open in a new tab and their URLs are SOB URLs.`
+          : `Launch Molina Marketplace, navigate through Member Resources → Forms & Documents, `
+            + `select state "${fullStateName}", toggle to coverage year ${scope.year}, and prove that no SOB PDF `
+            + `is exposed on the UI for plan "${scope.planName}" — searching under Category="Schedule of Benefits" `
+            + `must return zero result cards in both the English and Spanish passes. The SBC negative check still `
+            + `runs to confirm SBC is not exposed either.`;
         const perPlanReportTag = scope.testId || `MP-PLANS-Row${scope.row}`;
 
         try {
@@ -1038,9 +1113,12 @@ function registerGroup(group) {
 
 async function validateOnePlanUrl({
   index, expectedUrl, card, planName, labelPrefix,
+  docType, year, passCode, appUrl,
   marketplace, context, screenshotsDir, shotPrefix, planCards,
 }) {
   const prefix = labelPrefix || '';
+  const DOC = String(docType || 'SOB').toUpperCase();
+  const OTHER_DOCS = ['SOB', 'SBC', 'EOC'].filter((d) => d !== DOC);
   const card_ = {
     id: index,
     name: card ? `${prefix}${card.title}` : `${prefix}${planName} #${index}`,
@@ -1131,8 +1209,8 @@ async function validateOnePlanUrl({
     });
   });
 
-  // ── Step 2 — Verify the PDF URL is SOB (not SBC / EOC) and filename matches expected ──
-  await base.step(`Plan #${index} — Verify PDF URL is SOB (not SBC/EOC) and filename matches`, async () => {
+  // ── Step 2 — Verify the PDF URL matches the expected doc type (from Excel Label) and filename ──
+  await base.step(`Plan #${index} — Verify PDF URL is ${DOC} and filename matches`, async () => {
     const t0 = Date.now();
     const actualUrl = card_.pdfUrl || '';
     const actualPath = pathLower(actualUrl);
@@ -1141,17 +1219,33 @@ async function validateOnePlanUrl({
 
     const urlNotEmpty = !!actualUrl;
     const urlHasPdf   = /\.pdf(\?|#|$)/i.test(actualUrl);
-    const urlHasSOB   = DOC_TYPE_RE.SOB.test(actualPath);
-    const urlHasNoSBC = !DOC_TYPE_RE.SBC.test(actualPath);
-    const urlHasNoEOC = !DOC_TYPE_RE.EOC.test(actualPath);
+    const urlHasDoc   = DOC_TYPE_RE[DOC] ? DOC_TYPE_RE[DOC].test(actualPath) : true;
+    const urlHasNoOtherDocs = OTHER_DOCS.every((d) => !DOC_TYPE_RE[d].test(actualPath));
     const filenameMatches = !!expectedFilename && actualFilename === expectedFilename;
+
+    // Path-suffix sanity: /materials/<DOC>/<year>/<lang>/  (case-insensitive)
+    const langSeg = passCode === 'es' ? 'spanish' : 'english';
+    const expectedSuffix = `/materials/${DOC.toLowerCase()}/${String(year || '')}/${langSeg}/`;
+    const pathHasStructure = actualPath.includes(expectedSuffix);
+
+    // Origin match against configured AppUrl — soft warning only (env-agnostic).
+    let originMatches = true;
+    let originDetail = 'origin check skipped';
+    try {
+      const actualOrigin = new URL(actualUrl).origin;
+      const expectedOrigin = new URL(appUrl).origin;
+      originMatches = actualOrigin === expectedOrigin;
+      originDetail = originMatches
+        ? `origin="${actualOrigin}" matches AppUrl`
+        : `actual="${actualOrigin}" vs AppUrl="${expectedOrigin}" (env difference — not a failure)`;
+    } catch { /* URL parse failure — treat as skipped */ }
 
     const urlChecks = [
       { label: 'PDF URL not empty',       pass: urlNotEmpty, detail: actualUrl || '(empty)' },
       { label: 'PDF URL contains ".pdf"', pass: urlHasPdf,   detail: actualUrl },
-      { label: 'PDF URL contains "SOB"',  pass: urlHasSOB,   detail: urlHasSOB ? 'SOB token found in URL path' : 'SOB token NOT found in URL path' },
-      { label: 'PDF URL does NOT contain "SBC"', pass: urlHasNoSBC, detail: urlHasNoSBC ? 'no SBC token in URL' : 'SBC token found — SBC should not be exposed on public UI' },
-      { label: 'PDF URL does NOT contain "EOC"', pass: urlHasNoEOC, detail: urlHasNoEOC ? 'no EOC token in URL' : 'EOC token found — EOC should not be exposed on public UI' },
+      { label: `PDF URL contains "${DOC}"`, pass: urlHasDoc,   detail: urlHasDoc ? `${DOC} token found in URL path` : `${DOC} token NOT found in URL path` },
+      { label: `PDF URL does NOT contain other doc types (${OTHER_DOCS.join(', ')})`, pass: urlHasNoOtherDocs, detail: urlHasNoOtherDocs ? `no ${OTHER_DOCS.join('/')} tokens in URL` : `stray ${OTHER_DOCS.join('/')} token found in URL path` },
+      { label: `PDF URL path contains "${expectedSuffix}"`, pass: pathHasStructure, detail: pathHasStructure ? `matched structure` : `expected path to contain "${expectedSuffix}"` },
       {
         label: 'PDF filename matches expected',
         pass: filenameMatches,
@@ -1159,6 +1253,8 @@ async function validateOnePlanUrl({
           ? `filename="${actualFilename}"`
           : `expected="${expectedFilename}", actual="${actualFilename}"`,
       },
+      // Soft check — reported for visibility, does not fail the test.
+      { label: 'PDF host matches AppUrl origin (info)', pass: true, detail: originDetail },
     ];
     const urlOverall = urlChecks.every((c) => c.pass);
 
@@ -1174,10 +1270,10 @@ async function validateOnePlanUrl({
 
     pushPlanStep(card_, {
       id: 2,
-      name: 'Verify PDF URL is SOB',
-      expected: `PDF URL should be a SOB URL (contain "SOB", not "SBC" or "EOC") and filename should match expected.\nExpected filename: ${expectedFilename}`,
+      name: `Verify PDF URL is ${DOC}`,
+      expected: `PDF URL should be a ${DOC} URL (contain "${DOC}", not ${OTHER_DOCS.map(d => `"${d}"`).join(' or ')}) and filename should match expected.\nExpected filename: ${expectedFilename}`,
       actual: urlOverall
-        ? `PDF URL is a valid SOB URL and filename matches expected.\nActual: ${actualUrl || '(empty)'}`
+        ? `PDF URL is a valid ${DOC} URL and filename matches expected.\nActual: ${actualUrl || '(empty)'}`
         : `PDF URL validation failed.\nActual: ${actualUrl || '(empty)'}`,
       status: urlOverall ? 'PASS' : 'FAIL',
       durationMs: Date.now() - t0,
@@ -1185,10 +1281,10 @@ async function validateOnePlanUrl({
       screenshotLabel: `URL validation — ${card_.name}`,
     });
     card_.validations.push({
-      name: 'PDF URL matches SOB rule',
+      name: `PDF URL matches ${DOC} rule`,
       status: urlOverall ? 'PASS' : 'FAIL',
       description: urlOverall
-        ? 'All SOB URL checks passed.'
+        ? `All ${DOC} URL checks passed.`
         : urlChecks.filter((c) => !c.pass).map((c) => `${c.label} → ${c.detail}`).join('; '),
     });
     if (!urlOverall) card_.status = 'FAIL';

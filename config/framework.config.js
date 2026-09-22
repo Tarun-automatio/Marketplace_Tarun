@@ -337,17 +337,23 @@ const config = {
   //   SOB_Display | SOB_EN_Name | SOB_ES_Name | SOB_EN_URL | SOB_ES_URL
   //   EOC_Display | EOC_EN_Name | EOC_ES_Name | EOC_EN_URL | EOC_ES_URL
   //   OOC_Display | OOC_EN_Name | OOC_ES_Name | OOC_EN_URL | OOC_ES_URL
-  //   Notes | TargetHost
+  //   DocTypes | Languages | Notes | TargetHost
+  //
+  // Optional per-row narrowing (empty = run all globally enabled):
+  //   DocTypes  — comma list e.g. "SOB" or "SBC,SOB"
+  //   Languages — comma list e.g. "en" or "en,es"
+  // These sheet columns remove the need to edit env vars when switching
+  // which doc-type/language a state is tested against.
   marketplaceSitecoreDocs: {
     excelPath:  env('MARKETPLACE_SITECORE_DOCS_EXCEL',
                     path.join(process.cwd(), 'data', 'marketplace', 'MarketplaceSitecoreDocsData.xlsx')),
     excelSheet: env('MARKETPLACE_SITECORE_DOCS_SHEET', 'SitecoreDocs'),
 
-    // Doc-types included by default. User's requirement is SBC/EOC/OOC —
-    // add SOB via the env var when needed.
-    docTypes: String(env('MARKETPLACE_SITECORE_DOCS_TYPES', 'SBC,EOC,OOC'))
+    // Doc-types the loader will consider. Per-row `DocTypes` column (sheet)
+    // narrows further; env var overrides the default below.
+    docTypes: String(env('MARKETPLACE_SITECORE_DOCS_TYPES', 'SBC,EOC,OOC,SOB'))
       .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean),
-    // Languages included by default. Set to 'en' to skip Spanish, etc.
+    // Languages the loader will consider. Per-row `Languages` column narrows.
     languages: String(env('MARKETPLACE_SITECORE_DOCS_LANGS', 'en,es'))
       .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 

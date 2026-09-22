@@ -999,7 +999,7 @@ class MarketplacePage {
    * one to click first.
    */
   async findResultCardsByName(needle) {
-    const raw = String(needle || '').replace(/\s+/g, ' ').trim();
+    const raw = normalizePlanText(needle);
     if (!raw) return this.collectResultCards();
     // Escape regex metacharacters in the needle so plan names with e.g.
     // parentheses or plus signs work as literal text, then require a word
@@ -1007,11 +1007,11 @@ class MarketplacePage {
     const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
     const wordBoundaryRe = new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, 'i');
     const all = await this.collectResultCards();
-    // Prefer word-boundary matches; if none found, fall back to a loose
-    // substring match so testers get *some* signal instead of an empty list.
-    const strict = all.filter(c => wordBoundaryRe.test(c.title));
+    // Compare against a dash/whitespace-normalized title so hyphen vs en-dash
+    // (–/—/−) differences between site content and test data don't miss matches.
+    const strict = all.filter(c => wordBoundaryRe.test(normalizePlanText(c.title)));
     if (strict.length) return strict;
-    const loose = all.filter(c => c.title.toLowerCase().includes(raw.toLowerCase()));
+    const loose = all.filter(c => normalizePlanText(c.title).toLowerCase().includes(raw.toLowerCase()));
     return loose;
   }
 
@@ -1030,13 +1030,13 @@ class MarketplacePage {
    * @returns {Promise<{ index, title, href, linkLoc } | null>}
    */
   async findCardByNameAndUrl(needleName, expectedUrl) {
-    const nameKey = String(needleName || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const nameKey = normalizePlanText(needleName).toLowerCase();
     const expectedPath = expectedUrlToPath(expectedUrl);
     if (!nameKey || !expectedPath) return null;
     const all = await this.collectResultCards();
 
     const nameMatches = all.filter(c =>
-      c.title.replace(/\s+/g, ' ').trim().toLowerCase() === nameKey
+      normalizePlanText(c.title).toLowerCase() === nameKey
     );
     if (nameMatches.length === 0) return null;
 
@@ -1053,6 +1053,18 @@ class MarketplacePage {
 // ─── Module-scoped URL helpers used by findCardByNameAndUrl ─────────────────
 // Kept outside the class so they can be called without a MarketplacePage
 // instance (they're pure functions).
+
+// Normalize plan text so hyphen (-), en-dash (–), em-dash (—), minus (−)
+// and non-breaking hyphen (‑) all compare equal, dash spacing is canonical
+// (site content sometimes omits the space around the dash, e.g.
+// "Schedule of Benefits –Silver 3"), and whitespace is collapsed.
+function normalizePlanText(s) {
+  return String(s || '')
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, '-')
+    .replace(/\s*-\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 function hrefToPath(href) {
   const s = String(href || '').trim();

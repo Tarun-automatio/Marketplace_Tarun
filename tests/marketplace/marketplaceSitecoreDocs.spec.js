@@ -180,11 +180,19 @@ function loadTestMatrix() {
     const effectiveTargetHost = resolveTargetHost(rowTargetHost);
     if (!state || !planName) return;
 
+    // Optional per-row allow-lists. Empty cell → all globally enabled types/langs.
+    const rowDocTypes = norm(r.DocTypes)
+      .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const rowLangs = norm(r.Languages)
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
     for (const docType of DOC_TYPES) {
+      if (rowDocTypes.length && !rowDocTypes.includes(docType)) continue;
       const displayCell = norm(r[`${docType}_Display`]);
       if (!displayCell) continue;                              // no doc-type for this plan
 
       for (const lang of LANGUAGES) {
+        if (rowLangs.length && !rowLangs.includes(lang)) continue;
         const langKey = lang === 'es' ? 'ES' : 'EN';
         const rawUrl  = norm(r[`${docType}_${langKey}_URL`]);
         if (!rawUrl) continue;                                 // no URL cell — skip
