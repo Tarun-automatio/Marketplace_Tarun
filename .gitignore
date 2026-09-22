@@ -43,5 +43,9 @@ coverage/
 # ── Local backup / snapshot data (never push) ────────────────────────────
 data/**/*_backup_*.xlsx
 data/**/*_pre-*.xlsx
+data/**/*.bak-*.xlsx
 docs/reference/pageSnippets/*.docx
 *.spec.js.old
+
+# ── Local throwaway scripts (underscore-prefixed, never push) ─────────────
+scripts/_*.js
