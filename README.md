@@ -2,7 +2,7 @@
 
 Playwright framework for Molina Marketplace (Individual & Family / IFP) validation.
 
-This framework contains **five suites**. Each suite section below follows the same layout:
+This framework contains **six suites**. Each suite section below follows the same layout:
 
 1. **Run commands** (all `npm` commands for the suite, grouped together)
 2. **What it does** (test steps performed)
@@ -15,6 +15,7 @@ Suites:
 - [3. Marketplace Drug Pharmacy Links](#3-marketplace-drug-pharmacy-links)
 - [4. Marketplace Sitecore Docs (SBC / EOC / OOC / SOB)](#4-marketplace-sitecore-docs-sbc--eoc--ooc--sob)
 - [5. Marketplace Brochure & Formulary](#5-marketplace-brochure--formulary)
+- [6. Marketplace Service Area Maps](#6-marketplace-service-area-maps)
 
 Plus:
 
@@ -339,9 +340,67 @@ Resolution order for each key: **explicit env var** (for CI one-off overrides) �
 
 ---
 
+## 6. Marketplace Service Area Maps
+
+### Run commands
+
+- "npm run test:marketplace:maps" — cleans old artifacts and runs the Service Area Maps suite in **headless** mode
+- "npm run test:marketplace:maps:headed" — same run, but with a visible Chrome window
+- "npm run data:service-area-maps" — regenerates `data/marketplace/ServiceAreaMapsData.xlsx` from the seed configs at the top of [scripts/createServiceAreaMapsExcel.js](scripts/createServiceAreaMapsExcel.js) (adds new states / updates approved map filenames without touching the workbook by hand)
+
+### What it does
+
+Validates the **"View Marketplace Service Area Maps by State"** component on the *Brokers & Agents → Molina Healthcare* page (`/brokers-agents`). The component shows approved copy, a state dropdown, and — only after a state is selected — the state's Service Area Map image inline (no modal, popup, new tab, or download).
+
+Test steps performed (5 steps, mapped to the user story ACs):
+
+1. **Component displayed with approved content** — load the page and verify the heading, description, and `Select a State` dropdown placeholder match the approved verbiage (from the `Config` sheet).
+2. **No map on initial load** — with no state selected, verify no Service Area Map image is shown.
+3. **Select a state → map inline** — pick the first `Run=Y` state; verify its map renders inline below the component and **no new browser tab** opens.
+4. **Change state → map replaced** — pick the second state; verify the map `src` changes (previous map replaced).
+5. **Approved image per state** — verify the rendered `<img src>` contains the state's approved `MapImage` filename.
+
+The whole component + map is scrolled into view before each evidence screenshot, and the custom HTML report lands under `reports/marketplace-serviceAreaMaps/run/`.
+
+#### Narrow the matrix with env vars
+
+```powershell
+$env:SAM_STATE_FILTER = 'ca'                                  # single-state re-run (2-letter code)
+$env:SAM_URL          = 'https://pws-d1.molinahealthcare.com/brokers-agents'  # override env / URL
+npm run test:marketplace:maps
+```
+
+Unset with `Remove-Item Env:SAM_STATE_FILTER` to widen the scope again. With a single state, the "map replaced" step (4) auto-skips.
+
+### Data sheet + config
+
+**File:** `data/marketplace/ServiceAreaMapsData.xlsx`
+
+**Sheet `ServiceAreaMaps`** — one row per state
+
+Columns: `Run, TestId, State, Name, MapImage, Notes`
+
+- `Run` — `Y` to include the state in the run (anything else skips it)
+- `State` — 2-letter code, matches the dropdown `<option value>` (e.g. `CA`, `ID`)
+- `Name` — full state name, matches the dropdown option text (e.g. `California`)
+- `MapImage` — distinctive filename of the latest approved map; the spec asserts the rendered `<img src>` **contains** this value (e.g. `Texas-2027.png`)
+
+**Sheet `Config`** — single-value settings the spec reads as the source of truth (Key / Value)
+
+| Key                   | Purpose                                             |
+| --------------------- | --------------------------------------------------- |
+| `AppUrl`              | Landing page hosting the component                  |
+| `Heading`             | Approved component heading (asserted verbatim)      |
+| `Description`         | Approved component description (asserted verbatim)  |
+| `DropdownPlaceholder` | Approved dropdown placeholder text                  |
+
+Resolution order: **explicit env var** (`SAM_URL`, `SAM_STATE_FILTER`) → **`Config` sheet** → **hardcoded fallback in `config/framework.config.js`** (`serviceAreaMaps.verbiage`). The environment label in the report auto-detects from the URL (e.g. `pws-d1` → `QA (pws-d1)`); override with `SAM_TEST_ENVIRONMENT`.
+
+---
+
 ## Run all suites at once
 
-- "npm run test:all" — runs every spec under `tests/` (toggle-check + plan-search + drug-pharmacy + sitecore-docs + brochure-formulary)
+- "npm run test:all" — runs every spec under `tests/` (toggle-check + plan-search + drug-pharmacy + sitecore-docs + brochure-formulary + service-area-maps)
 
 The `tests/` folder layout:
 
@@ -353,6 +412,7 @@ tests/
     marketplaceDrugPharmacy.spec.js
     marketplaceSitecoreDocs.spec.js
     marketplaceBrochureFormulary.spec.js
+    serviceAreaMaps.spec.js
 ```
 
 Reports land under `reports/<suite>/<slug>/` as a self-contained HTML file with screenshots alongside.
@@ -367,6 +427,7 @@ Reports land under `reports/<suite>/<slug>/` as a self-contained HTML file with 
 - "npm run report:regen:docs" — rebuilds the Sitecore-docs dashboards + `all-reports-<STATE>/` flat folder from existing `variant.json` files (no test run)
 - "npm run data:brochure-formulary" — regenerates the Brochure & Formulary Excel workbook from the state configs in [scripts/createBrochureFormularyExcel.js](scripts/createBrochureFormularyExcel.js)
 - "npm run report:regen:brochure" — rebuilds the Brochure & Formulary dashboards + `all-reports-<STATE>/` flat folder from existing `variant.json` files (no test run)
+- "npm run data:service-area-maps" — regenerates the Service Area Maps Excel workbook from the state configs in [scripts/createServiceAreaMapsExcel.js](scripts/createServiceAreaMapsExcel.js)
 
 ---
 

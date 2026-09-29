@@ -8,6 +8,7 @@
  *   • `playwright test tests/marketplace/marketplace.spec.js`             →  cleans reports/marketplace-toggleCheck
  *   • `playwright test tests/marketplace/marketplacePlanSearch.spec.js`   →  cleans reports/marketplace-plans
  *   • `playwright test tests/marketplace/marketplaceDrugPharmacy.spec.js` →  cleans reports/marketplace-pharmacy
+ *   • `playwright test tests/marketplace/serviceAreaMaps.spec.js`         →  cleans reports/marketplace-serviceAreaMaps
  *   • `playwright test` (no spec filter)                                  →  cleans ALL suite reports
  *
  * `reports/test-results` (Playwright traces / videos / failure screenshots)
@@ -27,6 +28,7 @@ const SUITE_REPORTS = [
   { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,      dir: 'reports/marketplace-pharmacy' },
   { match: /tests[\\/]marketplace[\\/]marketplaceSitecoreDocs\.spec\.js/i,      dir: 'reports/marketplace-sitecore-docs' },
   { match: /tests[\\/]marketplace[\\/]marketplaceBrochureFormulary\.spec\.js/i, dir: 'reports/marketplace-brochure-formulary' },
+  { match: /tests[\\/]marketplace[\\/]serviceAreaMaps\.spec\.js/i,              dir: 'reports/marketplace-serviceAreaMaps' },
   { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,                  dir: 'reports/marketplace-toggleCheck' },
 ];
 

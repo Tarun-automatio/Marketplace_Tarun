@@ -229,6 +229,43 @@ const config = {
     },
   },
 
+  // ── Marketplace Service Area Maps suite ────────────────────────────────
+  // "View Marketplace Service Area Maps by State" component on the
+  // Brokers & Agents → Molina Healthcare page. The state matrix (states +
+  // approved map image filenames) lives in the Excel sheet below (one row
+  // per state, Run=Y to include); the approved static copy is in `verbiage`.
+  serviceAreaMaps: {
+    urls: {
+      // Base marketplace host + the Brokers & Agents landing path that hosts
+      // the Service Area Maps component. Override with SAM_URL for lower envs.
+      appUrl: env('SAM_URL', 'https://pws-d1.molinahealthcare.com/brokers-agents'),
+    },
+    // Data-driven matrix source. Rows where `Run=Y` become states under test.
+    // Regenerate with `npm run data:service-area-maps`.
+    excelPath:  env('SAM_EXCEL',       path.join(process.cwd(), 'data', 'marketplace', 'ServiceAreaMapsData.xlsx')),
+    excelSheet: env('SAM_EXCEL_SHEET', 'ServiceAreaMaps'),
+    // Key/Value sheet holding the URL + approved verbiage (source of truth).
+    configSheet: env('SAM_CONFIG_SHEET', 'Config'),
+    // Optional single-state re-run filter (2-letter code, e.g. "tx").
+    stateFilter: env('SAM_STATE_FILTER', ''),
+    // Fallback URL + copy used only when the Excel "Config" sheet is missing.
+    verbiage: {
+      heading:             'View Marketplace Service Area Maps by State',
+      description:         'Find and view Molina service area maps for your state. Select a state from the dropdown to access the latest coverage and service area information.',
+      dropdownPlaceholder: 'Select a State',
+      noMapMessage:        'Service Area Map is currently unavailable for the selected state.',
+    },
+    test: {
+      id:          env('SAM_TEST_ID',     'MP-SAM-001'),
+      module:      env('SAM_TEST_MODULE', 'Marketplace / Service Area Maps'),
+      author:      env('SAM_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('SAM_TEST_ENVIRONMENT', ''),  // '' → auto-detect from URL
+    },
+    report: {
+      dir: path.join(process.cwd(), env('SAM_REPORT_DIR', 'reports/marketplace-serviceAreaMaps')),
+    },
+  },
+
   // ── Marketplace Plan Search suite ──────────────────────────────────────
   // SOB-only search flow. Each Excel row is one plan; the row's
   // Audience/Category drive the filter (typically "Marketplace" /

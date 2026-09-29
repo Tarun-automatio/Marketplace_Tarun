@@ -24,6 +24,7 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 const { generateMarketplaceSummaries }   = require('./marketplaceSummary');
 const { generatePlansDashboard }         = require('./marketplacePlansSummary');
 const { generatePharmacyDashboard }      = require('./marketplacePharmacySummary');
@@ -113,5 +114,35 @@ module.exports = async function globalTeardown() {
     }
   } catch (err) {
     console.error(`[TEARDOWN] Marketplace Brochure & Formulary dashboard failed: ${err && err.message}`);
+  }
+
+  // ── Marketplace Service Area Maps — gather every per-state report into
+  //    a single `all_report/` folder. The per-state HTMLs embed screenshots
+  //    as base64, so they stay fully viewable after being copied.
+  const samDir = path.join(process.cwd(), 'reports', 'marketplace-serviceAreaMaps');
+  try {
+    if (fs.existsSync(samDir)) {
+      const allDir = path.join(samDir, 'all_report');
+      fs.rmSync(allDir, { recursive: true, force: true });  // rebuild fresh each run
+      fs.mkdirSync(allDir, { recursive: true });
+      let copied = 0;
+      for (const entry of fs.readdirSync(samDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === 'all_report') continue;
+        const stateDir = path.join(samDir, entry.name);
+        for (const f of fs.readdirSync(stateDir)) {
+          if (f.toLowerCase().endsWith('.html')) {
+            fs.copyFileSync(path.join(stateDir, f), path.join(allDir, f));
+            copied++;
+          }
+        }
+      }
+      if (copied > 0) {
+        console.log(`[TEARDOWN] Marketplace Service Area Maps: collected ${copied} report(s) → ${allDir}`);
+      } else {
+        fs.rmSync(allDir, { recursive: true, force: true });  // nothing to collect
+      }
+    }
+  } catch (err) {
+    console.error(`[TEARDOWN] Marketplace Service Area Maps all_report failed: ${err && err.message}`);
   }
 };
