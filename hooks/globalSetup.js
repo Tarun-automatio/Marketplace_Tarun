@@ -28,6 +28,8 @@ const SUITE_REPORTS = [
   { match: /tests[\\/]marketplace[\\/]marketplaceDrugPharmacy\.spec\.js/i,      dir: 'reports/marketplace-pharmacy' },
   { match: /tests[\\/]marketplace[\\/]marketplaceSitecoreDocs\.spec\.js/i,      dir: 'reports/marketplace-sitecore-docs' },
   { match: /tests[\\/]marketplace[\\/]marketplaceBrochureFormulary\.spec\.js/i, dir: 'reports/marketplace-brochure-formulary' },
+  { match: /tests[\\/]marketplace[\\/]marketplaceNMPlanBrochure\.spec\.js/i,    dir: 'reports/marketplace-nm-plan-brochure' },
+  { match: /tests[\\/]marketplace[\\/]marketplacePlanSearchSob\.spec\.js/i,     dir: 'reports/marketplace-plans-sob' },
   { match: /tests[\\/]marketplace[\\/]serviceAreaMaps\.spec\.js/i,              dir: 'reports/marketplace-serviceAreaMaps' },
   { match: /tests[\\/]marketplace[\\/]marketplace\.spec\.js/i,                  dir: 'reports/marketplace-toggleCheck' },
 ];

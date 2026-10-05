@@ -194,10 +194,15 @@ class MarketplacePage {
   /**
    * The "Member Resources" trigger in the top navigation. It is a `<button>`
    * with aria-label="Member resources" that opens the megamenu on click/hover.
+   * The Spanish site translates the aria-label to "Recursos para miembros",
+   * so we match both forms (plus a loose "Recursos" prefix fallback).
    */
   memberResourcesButton() {
     return this.page.locator(
-      'button[aria-label="Member resources" i], [role="button"][aria-label="Member resources" i]'
+      'button[aria-label="Member resources" i], '
+      + '[role="button"][aria-label="Member resources" i], '
+      + 'button[aria-label*="Recursos" i], '
+      + '[role="button"][aria-label*="Recursos" i]'
     ).first();
   }
 
