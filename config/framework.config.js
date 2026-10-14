@@ -287,6 +287,9 @@ const config = {
       year:  env('MARKETPLACE_PLANS_YEAR',  ''),
       plan:  env('MARKETPLACE_PLANS_PLAN',  ''),   // substring match on PlanName
     },
+    // Language passes to run per plan. Default runs both EN + ES; set
+    // MARKETPLACE_PLANS_LANGUAGES=es to run only the Spanish pass.
+    languages: env('MARKETPLACE_PLANS_LANGUAGES', 'en,es'),
     test: {
       id:          env('MARKETPLACE_PLANS_TEST_ID',     'MP-PLANS-001'),
       module:      env('MARKETPLACE_PLANS_TEST_MODULE', 'Marketplace / Plan Search'),
@@ -346,6 +349,64 @@ const config = {
     },
     report: {
       dir: path.join(process.cwd(), env('MARKETPLACE_PHARMACY_REPORT_DIR', 'reports/marketplace-pharmacy')),
+    },
+  },
+
+  // ── Marketplace 2027 Drug Lookup / Search Tool suite ───────────────────
+  // The IFP Drug page (`/ifp/{state}/drugs`) hosts a "Drug Search Tool"
+  // component: pick a plan from a <select>, click "Search Drug Coverage",
+  // confirm Molina's External Site Modal (Continue), and land on the CVS
+  // Caremark drug-search site in a new tab. Data-driven from
+  // DrugLookupTool.xlsx:
+  //   RUN | State | Updated Plan Marketing Name | CVS Drug Search Website URL
+  // Runs the full flow in English AND Spanish (Spanish = `/es-us/` prefix,
+  // same plan list, same CVS destinations). Separate report trees per
+  // language → separate English / Spanish dashboards.
+  drugTool: {
+    urls: {
+      // `{state}` substituted per row (lower-cased). Spanish inserts the
+      // `esPrefix` segment right after the origin.
+      template: env('DRUG_TOOL_URL_TEMPLATE',
+                    'https://uat-pws.molinahealthcare.com/ifp/{state}/drugs'),
+      esPrefix: env('DRUG_TOOL_ES_PREFIX', '/es-us'),
+    },
+    excelPath:  env('DRUG_TOOL_EXCEL',
+                    path.join(process.cwd(), 'data', 'marketplace', 'DrugLookupTool.xlsx')),
+    excelSheet: env('DRUG_TOOL_EXCEL_SHEET', 'Sheet1'),
+    // Heading text of the tool section under test. The live page prefixes
+    // the plan year ("2027 Drug Search Tool"); matching is substring + CI
+    // so "Drug Search Tool" / "Drug Lookup Tool" both resolve.
+    toolHeading: env('DRUG_TOOL_HEADING', 'Drug Search Tool'),
+    planYear:    env('DRUG_TOOL_PLAN_YEAR', '2027'),
+    // Languages to execute (comma list). Overridden per npm script.
+    languages:   env('DRUG_TOOL_LANGUAGES', 'en,es'),
+    // Device profile: desktop | iphoneSE | ipadPro. Overridden per script.
+    device:      env('DRUG_TOOL_DEVICE', 'desktop'),
+    // Optional: attach to an already-running Chrome (started with
+    // --remote-debugging-port) instead of launching a fresh browser. Lets
+    // the suite reuse your authenticated, Akamai-cleared session so it can
+    // reach WAF-protected hosts like uat-pws. Empty = normal launch.
+    cdpEndpoint: env('DRUG_TOOL_CDP_ENDPOINT', ''),
+    // Optional single-state filter (2-letter code, e.g. "ca").
+    filters: {
+      state: env('DRUG_TOOL_STATE', ''),
+    },
+    // Wait for the destination (CVS) redirect chain to settle before
+    // reading the new tab's final URL.
+    newTabRedirectWaitMs: env('DRUG_TOOL_REDIRECT_WAIT_MS', 15000),
+    // Extra settle before capturing the post-navigation screenshot so the
+    // CVS page finishes its "Processing request" spinner.
+    screenshotSettleMs:   env('DRUG_TOOL_SCREENSHOT_SETTLE_MS', 5000),
+    test: {
+      id:          env('DRUG_TOOL_TEST_ID',     'MP-DRUGTOOL-001'),
+      module:      env('DRUG_TOOL_TEST_MODULE', 'Marketplace / Drug Lookup Tool'),
+      author:      env('DRUG_TOOL_TEST_AUTHOR', 'Molina QA Automation'),
+      environment: env('DRUG_TOOL_TEST_ENVIRONMENT', ''),  // '' → auto-detect
+    },
+    report: {
+      // Per-language report trees → separate English / Spanish dashboards.
+      dirEn: path.join(process.cwd(), env('DRUG_TOOL_REPORT_DIR_EN', 'reports/drug-tool-EN')),
+      dirEs: path.join(process.cwd(), env('DRUG_TOOL_REPORT_DIR_ES', 'reports/drug-tool-ES')),
     },
   },
 

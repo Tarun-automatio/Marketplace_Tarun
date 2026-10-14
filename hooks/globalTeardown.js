@@ -30,6 +30,8 @@ const { generatePlansDashboard }         = require('./marketplacePlansSummary');
 const { generatePharmacyDashboard }      = require('./marketplacePharmacySummary');
 const { generateSitecoreDocsDashboard }  = require('./marketplaceSitecoreDocsSummary');
 const { generateBrochureFormularyDashboard } = require('./marketplaceBrochureFormularySummary');
+const { generateDrugToolDashboards }     = require('./drugToolSummary');
+const frameworkConfig                    = require('../config/framework.config');
 
 module.exports = async function globalTeardown() {
   // ── Marketplace toggle-check consolidated report (per state) ──────────
@@ -144,5 +146,21 @@ module.exports = async function globalTeardown() {
     }
   } catch (err) {
     console.error(`[TEARDOWN] Marketplace Service Area Maps all_report failed: ${err && err.message}`);
+  }
+
+  // ── Drug Lookup Tool — separate English / Spanish dashboards ──────────
+  try {
+    const dt = (frameworkConfig.drugTool && frameworkConfig.drugTool.report) || {};
+    const written = generateDrugToolDashboards({ dirEn: dt.dirEn, dirEs: dt.dirEs });
+    if (written.length) {
+      console.log(`[TEARDOWN] Drug Lookup Tool dashboard(s) written (${written.length}):`);
+      for (const w of written) {
+        console.log(`  \u2022 [${w.language}] ${w.file}  (${w.count} state${w.count === 1 ? '' : 's'})`);
+      }
+    } else {
+      console.log('[TEARDOWN] No drug-tool variant.json files found \u2014 dashboard skipped.');
+    }
+  } catch (err) {
+    console.error(`[TEARDOWN] Drug Lookup Tool dashboard failed: ${err && err.message}`);
   }
 };

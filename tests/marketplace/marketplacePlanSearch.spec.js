@@ -144,6 +144,11 @@ const NEG_SBC_ENABLED = NEG_SBC.enabled !== false;
 const NEG_SBC_AUDIENCE = String(NEG_SBC.audience || 'Marketplace');
 const NEG_SBC_CATEGORY = String(NEG_SBC.category || 'Summary of Benefits');
 
+// Language passes to run per plan. Default 'en,es' runs both; set
+// MARKETPLACE_PLANS_LANGUAGES=es to run only the Spanish pass.
+const PLAN_LANG_PASSES = String(frameworkConfig.marketplacePlans.languages || 'en,es')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
 // Doc-type detection used for the SOB-only URL rule. The regex is
 // anchored on non-alphanumeric boundaries (`/`, `_`, `.`, `-`) so a plan
 // name that coincidentally contains the letters "sob" cannot trip it, and
@@ -608,7 +613,7 @@ function registerGroup(group) {
             const languagePasses = [
               { code: 'en', label: 'EN', switchBefore: false },
               { code: 'es', label: 'ES', switchBefore: true  },
-            ];
+            ].filter((p) => PLAN_LANG_PASSES.includes(p.code));
 
             for (let passIdx = 0; passIdx < languagePasses.length; passIdx++) {
               const pass = languagePasses[passIdx];
@@ -621,7 +626,25 @@ function registerGroup(group) {
                   let ok = true, errMsg = '';
                   const urlBefore = page.url();
                   try {
-                    await marketplace.switchLanguage('es');
+                    // The language menu can be slow to render; retry the switch
+                    // a few times (plus a direct /es-us/ fallback) before failing.
+                    let switched = false, lastErr;
+                    for (let attempt = 1; attempt <= 3 && !switched; attempt++) {
+                      try {
+                        await marketplace.switchLanguage('es');
+                        if (/\/es-us\//i.test(page.url())) switched = true;
+                        else throw new Error('URL did not switch to /es-us/');
+                      } catch (e) {
+                        lastErr = e;
+                        await page.waitForTimeout(1000);
+                      }
+                    }
+                    if (!switched) {
+                      // Last resort: navigate straight to the ES Forms & Documents URL.
+                      const esUrl = cleanFormsAndDocsUrl(appUrl, state, year).replace(/^(https?:\/\/[^/]+)/i, '$1/es-us');
+                      await page.goto(esUrl, { waitUntil: 'domcontentloaded', timeout: frameworkConfig.navigationTimeoutMs }).catch(() => {});
+                      if (!/\/es-us\//i.test(page.url())) throw (lastErr || new Error('Language switch to Spanish failed'));
+                    }
                     await marketplace.scrollToAllFormsAndDocuments();
                   } catch (err) {
                     ok = false; errMsg = (err && err.message) ? err.message.substring(0, 200) : String(err);

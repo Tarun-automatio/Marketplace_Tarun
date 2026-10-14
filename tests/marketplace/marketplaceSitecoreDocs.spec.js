@@ -119,13 +119,15 @@ function rewriteHost(rawUrl, targetHost) {
 }
 
 /** Resolve the effective target host for a row:
- *    row's `TargetHost` cell > env var override > config default (HOST_DST).
- *  A non-empty cell always wins so the sheet stays the source of truth.
+ *    explicit env override (HOST_DST_ENV) > row's `TargetHost` cell > config default.
+ *  The env var is only set when the user explicitly exports
+ *  MARKETPLACE_SITECORE_DOCS_TARGET_HOST, so by default the sheet cell still
+ *  wins; exporting it repoints the whole run to one environment.
  */
 function resolveTargetHost(rowTargetHost) {
+  if (HOST_DST_ENV) return HOST_DST_ENV;
   const cell = String(rowTargetHost || '').trim().toLowerCase();
   if (cell) return cell;
-  if (HOST_DST_ENV) return HOST_DST_ENV;
   return HOST_DST;
 }
 
